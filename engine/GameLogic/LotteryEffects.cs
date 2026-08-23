@@ -1,5 +1,5 @@
 using System.Collections.Generic;
-
+//仅包含部分与全局有关的抽奖内容，其余参考LotteryResolver，或者gamemanager。
 //纯数据文件，不含unity相关内容
 public static class LotteryEffects
 {
