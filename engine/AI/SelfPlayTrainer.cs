@@ -146,7 +146,7 @@ public static class SelfPlayTrainer
             double temp = (move < tempThreshold) ? temperature : 0.01;
             GameAction best = SampleActionByTemperature(dist, temp, rng);
             if (best == null) break;
-            best.Execute(state, rng);
+            ai.ExecuteAction(state, best);
 
             // 重复局面判负：同一局面出现 3 次，判"刚走的一方"负（避免长捉来回走子）
             long rk = MctsEngine.RepetitionKey(state);

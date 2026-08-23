@@ -52,6 +52,11 @@ public class AIPlayer
         return engine.GetActionDistribution(state, rng);
     }
 
+    public void ExecuteAction(Gamestate state, GameAction action)
+    {
+        engine.ExecuteAction(state, action, rng);
+    }
+
     /// <summary>重置随机种子（用于可复现测试）</summary>
     public void ResetRandom(int? seed = null)
     {

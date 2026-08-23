@@ -3,8 +3,6 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 
 // ====================================================================
-// MCTS 核心引擎（Phase 1：纯随机模拟，无神经网络）。
-//
 // 支持两种抽奖处理方式：
 //   Scheme A — lotteryCMultiplier > 1: 抽奖在 UCB 中获得更高探索权重
 //   Scheme B — useLotteryChanceNodes: 抽奖作为 ChanceNode，
@@ -73,6 +71,14 @@ public class MctsEngine
         foreach (MctsNode child in root.children)
             dist.Add((child.action, child.visitCount / total));
         return dist;
+    }
+
+    public void ExecuteAction(Gamestate state, GameAction action, System.Random rng)
+    {
+        if (action is LotteryAction)
+            ExecuteLottery(state, rng);
+        else
+            action.Execute(state, rng);
     }
 
     // ================================================================
@@ -223,7 +229,7 @@ public class MctsEngine
             if (!IsActionValid(node.action, state))
                 return node;
 
-            node.action.Execute(state, rng);
+            ExecuteAction(state, node.action, rng);
         }
 
         return node; // 终局
@@ -243,9 +249,7 @@ public class MctsEngine
         int outcome = rng.Next(1, 41);
         node.sampledOutcome = outcome;
 
-        // 执行抽奖效果并切换回合（含冷却/墙更新）
-        LotteryResolver.Resolve(state, outcome, rng);
-        GameAction.EndTurn(state);
+        ExecuteLotteryOutcome(state, outcome, rng);
 
         // 查找已有 outcome 子节点
         if (node.outcomeChildren == null)
@@ -264,6 +268,59 @@ public class MctsEngine
         }
 
         return node; // PW 限制达到
+    }
+
+    private void ExecuteLottery(Gamestate state, System.Random rng)
+    {
+        int outcome = rng.Next(1, 41);
+        ExecuteLotteryOutcome(state, outcome, rng);
+        GameAction.EndTurn(state);
+    }
+
+    private void ExecuteLotteryOutcome(Gamestate state, int outcome, System.Random rng)
+    {
+        List<LotteryChoice> choices = LotteryResolver.GetChoices(state, outcome);
+        if (choices.Count == 0)
+        {
+            LotteryResolver.ResolveChoice(state, outcome, null);
+            return;
+        }
+
+        LotteryChoice selected = neural == null
+            ? choices[rng.Next(choices.Count)]
+            : SelectLotteryChoiceByValue(state, outcome, choices);
+        LotteryResolver.ResolveChoice(state, outcome, selected);
+    }
+
+    private LotteryChoice SelectLotteryChoiceByValue(Gamestate state, int outcome,
+        List<LotteryChoice> choices)
+    {
+        LotteryChoice bestChoice = choices[0];
+        double bestOpponentValue = double.PositiveInfinity;
+
+        foreach (LotteryChoice choice in choices)
+        {
+            Gamestate candidate = state.DeepClone();
+            LotteryResolver.ResolveChoice(candidate, outcome, choice);
+            GameAction.EndTurn(candidate);
+
+            double opponentValue;
+            if (IsTerminal(candidate))
+                opponentValue = -Evaluate(candidate);
+            else
+            {
+                var prediction = neural.Predict(candidate);
+                opponentValue = candidate.currentTeam == 1 ? prediction.value : -prediction.value;
+            }
+
+            if (opponentValue < bestOpponentValue)
+            {
+                bestOpponentValue = opponentValue;
+                bestChoice = choice;
+            }
+        }
+
+        return bestChoice;
     }
 
     // ================================================================
@@ -379,7 +436,6 @@ public class MctsEngine
 
     // ================================================================
     //  Simulate — 从当前状态随机走子到终局（rollout）
-    //  含局面重复检测：同哈希出现 3 次判和（防长捉无限循环）。
     // ================================================================
 
     private double Simulate(Gamestate state, System.Random rng)

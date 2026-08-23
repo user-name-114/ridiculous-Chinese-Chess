@@ -135,7 +135,10 @@ public static class MatchRunner
             }
 
             // 执行
-            action.Execute(state, rng);
+            if (ai != null)
+                ai.ExecuteAction(state, action);
+            else
+                action.Execute(state, rng);
 
             // 重复局面判负：同一局面出现 3 次，判"刚走的一方"负
             long rk = MctsEngine.RepetitionKey(state);

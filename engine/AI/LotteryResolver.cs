@@ -3,16 +3,44 @@ using System.Collections.Generic;
 
 // ====================================================================
 // 抽奖效果解析器。
-// 在 MCTS 模拟中随机采样抽奖结果并执行，不依赖 Unity。
-//作用：在 AI 模拟对局中，当执行抽奖行动时，自动、无交互地完成所有抽奖效果的目标选择和效果应用。
-//它替代了人类玩家的点击选择过程，使得 AI 能在没有 UI 的环境下独立运行完整的抽奖流程。
-//升级与生成均随机：使用传入的 rng 随机挑选目标，保证模拟的可复现性。
+// 在 MCTS 模拟中解析抽奖结果并应用效果，不依赖 Unity。
+// 主动目标可由调用方枚举并指定；旧 Resolve 接口保留随机回退路径。
 //遵守友伤规则：生成棋子时检查目标格是否已有己方棋子，若友伤关闭则排除该位置。
 //多数量生成（如 2 个炮）：每次都从剩余合法位置中随机取，确保不重复覆盖。
 //复活重置状态：复活后清除冻结计时，并重置狙击冷却（设冷却为 1，不可用）。
 //自动升级将：御驾亲征直接找唯一帅升级，无需选择。
 //边界处理：如果无合法目标，静默返回，不会报错。
 // ====================================================================
+public enum LotteryChoiceType
+{
+    Piece,
+    TwoPieces,
+    Position,
+    TwoPositions,
+    Revive
+}
+
+public sealed class LotteryChoice
+{
+    public LotteryChoiceType type;
+    public int x;
+    public int y;
+    public int secondX;
+    public int secondY;
+    public int graveyardIndex;
+
+    public LotteryChoice(LotteryChoiceType type, int x = 0, int y = 0,
+        int secondX = int.MinValue, int secondY = int.MinValue, int graveyardIndex = -1)
+    {
+        this.type = type;
+        this.x = x;
+        this.y = y;
+        this.secondX = secondX;
+        this.secondY = secondY;
+        this.graveyardIndex = graveyardIndex;
+    }
+}
+
 public static class LotteryResolver
 {
     /// <summary>主入口：根据抽奖编号在 state 上执行效果（会修改 state）</summary>
@@ -75,6 +103,275 @@ public static class LotteryResolver
             // ---- 36-40: 未中奖 ----
             default: break;
         }
+    }
+
+    public static List<LotteryChoice> GetChoices(Gamestate state, int outcome)
+    {
+        int team = state.currentTeam;
+        var choices = new List<LotteryChoice>();
+
+        switch (outcome)
+        {
+            case 1: AddPieceChoices(state, choices, PieceType.Rook, 1, team); break;
+            case 2: AddPieceChoices(state, choices, PieceType.Cannon, 1, team); break;
+            case 3: AddPieceChoices(state, choices, PieceType.Cannon, 2, team); break;
+            case 4: AddPieceChoices(state, choices, PieceType.Pawn, 1, team); break;
+            case 6: AddPieceChoices(state, choices, PieceType.Bishop, 1, team); break;
+            case 7: AddPieceChoices(state, choices, PieceType.Bishop, 2, team); break;
+            case 8: AddPieceChoices(state, choices, PieceType.Pawn, 2, team); break;
+            case 11: AddTwoPieceChoices(state, choices, PieceType.Knight, 1, team); break;
+            case 12: AddPieceChoices(state, choices, PieceType.Guard, 1, team); break;
+            case 16: AddEnemyChoices(state, choices, team, false); break;
+            case 28: case 29: case 30: AddEnemyChoices(state, choices, team, true); break;
+            case 31: case 32: case 33: case 34: case 35: AddFrozenChoices(state, choices, team); break;
+            case 13: AddGenerationChoices(state, choices, team, PieceType.Cannon); break;
+            case 14: AddGenerationChoices(state, choices, team, PieceType.Knight); break;
+            case 15: AddRookPositionChoices(state, choices, team); break;
+            case 17: case 18: case 19: case 20: case 21: AddReviveChoices(state, choices, team); break;
+        }
+
+        return choices;
+    }
+
+    public static void ResolveChoice(Gamestate state, int outcome, LotteryChoice choice)
+    {
+        int team = state.currentTeam;
+        if (choice == null)
+        {
+            ResolveAutomatic(state, outcome, team);
+            return;
+        }
+
+        switch (outcome)
+        {
+            case 1:
+            case 2:
+            case 3:
+            case 4:
+            case 6:
+            case 7:
+            case 8:
+            case 12:
+                UpgradeAt(state, choice.x, choice.y, team, UpgradeType(outcome)); break;
+            case 11:
+                UpgradeAt(state, choice.x, choice.y, team, 1);
+                UpgradeAt(state, choice.secondX, choice.secondY, team, 1); break;
+            case 16: DefectAt(state, choice.x, choice.y, team); break;
+            case 28: case 29: case 30: FreezeAt(state, choice.x, choice.y, team); break;
+            case 31: case 32: case 33: case 34: case 35: DefrostAt(state, choice.x, choice.y, team); break;
+            case 13:
+                GenerateAt(state, choice.x, choice.y, PieceType.Cannon, team);
+                if (choice.secondX != int.MinValue) GenerateAt(state, choice.secondX, choice.secondY, PieceType.Cannon, team);
+                break;
+            case 14:
+                GenerateAt(state, choice.x, choice.y, PieceType.Knight, team);
+                if (choice.secondX != int.MinValue) GenerateAt(state, choice.secondX, choice.secondY, PieceType.Knight, team);
+                break;
+            case 15: GenerateAt(state, choice.x, choice.y, PieceType.Rook, team); break;
+            case 17: case 18: case 19: case 20: case 21: ReviveAt(state, choice, team); break;
+            default: ResolveAutomatic(state, outcome, team); break;
+        }
+    }
+
+    private static void ResolveAutomatic(Gamestate state, int outcome, int team)
+    {
+        switch (outcome)
+        {
+            case 5: ResolveAutoUpgradeKing(state, team); break;
+            case 9: PieceGenerator.GeneratePawnsOnRiver(state, team); break;
+            case 10: PieceGenerator.GenerateWall(state, team); break;
+            case 22: LotteryEffects.Reverse(state); break;
+            case 23: LotteryEffects.Flood(state); break;
+            case 24: LotteryEffects.ChargeBugle(state); break;
+            case 25: LotteryEffects.LaserCannon(state); break;
+            case 26: if (!state.isBoardExpanded) LotteryEffects.ExpandBoard(state); break;
+            case 27: if (state.isBoardExpanded) LotteryEffects.ShrinkBoard(state); break;
+        }
+    }
+
+    private static void UpgradeAt(Gamestate state, int x, int y, int team, int level)
+    {
+        Piece piece = state[x, y];
+        if (piece.thisTeam == team && piece.upgradeLevel != level
+            && piece.upgradeLevel + level <= MaxUpgradeLevel(piece.type))
+            piece.Upgrade(piece.upgradeLevel + level);
+    }
+
+    private static void DefectAt(Gamestate state, int x, int y, int team)
+    {
+        Piece piece = state[x, y];
+        if (piece.type != PieceType.Empty && piece.type != PieceType.Wall
+            && piece.type != PieceType.King && piece.thisTeam == -team)
+            piece.Defect();
+    }
+
+    private static void FreezeAt(Gamestate state, int x, int y, int team)
+    {
+        Piece piece = state[x, y];
+        if (piece.type != PieceType.Empty && piece.type != PieceType.Wall && piece.thisTeam == -team)
+            piece.frozenTurns = 6;
+    }
+
+    private static void DefrostAt(Gamestate state, int x, int y, int team)
+    {
+        Piece piece = state[x, y];
+        if (piece.thisTeam == team && piece.frozenTurns > 0)
+            piece.frozenTurns = 0;
+    }
+
+    private static void GenerateAt(Gamestate state, int x, int y, PieceType type, int team)
+    {
+        if (!state.IsValidPosition(x, y)) return;
+        Piece target = state[x, y];
+        if (target.type == PieceType.Wall
+            || (target.type != PieceType.Empty && target.thisTeam == team && Piece.friendlyFire != 1)) return;
+        if (target.type != PieceType.Empty && target.isDead)
+            state.AddToGraveyard(target);
+        PieceGenerator.PlacePieceAt(state, x, y, type);
+    }
+
+    private static void ReviveAt(Gamestate state, LotteryChoice choice, int team)
+    {
+        var graveyard = team == 1 ? state.redGraveyard : state.blackGraveyard;
+        if (choice.graveyardIndex < 0 || choice.graveyardIndex >= graveyard.Count) return;
+        Piece target = state[choice.x, choice.y];
+        if (target.type == PieceType.Wall
+            || (target.type != PieceType.Empty && target.thisTeam == team && Piece.friendlyFire != 1)) return;
+        Piece piece = graveyard[choice.graveyardIndex];
+        PieceGenerator.RevivePiece(state, piece, choice.x, choice.y);
+        piece.frozenTurns = 0;
+        if (piece is Pawn pawn && (pawn.upgradeLevel == 1 || pawn.upgradeLevel == 3))
+        {
+            pawn.sniperCooldown = 2;
+            pawn.sniperAvailable = false;
+        }
+    }
+
+    private static int UpgradeType(int outcome) => outcome == 3 || outcome == 7 ? 2 : 1;
+
+    private static void AddPieceChoices(Gamestate state, List<LotteryChoice> choices,
+        PieceType type, int level, int team)
+    {
+        for (int x = state.leftBound; x <= state.rightBound; x++)
+            for (int y = state.lowerBound; y <= state.upperBound; y++)
+            {
+                Piece p = state[x, y];
+                if (p.type == type && p.thisTeam == team && p.upgradeLevel != level
+                    && p.upgradeLevel + level <= MaxUpgradeLevel(type))
+                    choices.Add(new LotteryChoice(LotteryChoiceType.Piece, x, y));
+            }
+    }
+
+    private static void AddTwoPieceChoices(Gamestate state, List<LotteryChoice> choices,
+        PieceType type, int level, int team)
+    {
+        var candidates = new List<(int x, int y)>();
+        AddCandidatePositions(state, candidates, type, level, team);
+        for (int i = 0; i < candidates.Count; i++)
+            for (int j = i + 1; j < candidates.Count; j++)
+                choices.Add(new LotteryChoice(LotteryChoiceType.TwoPieces,
+                    candidates[i].x, candidates[i].y, candidates[j].x, candidates[j].y));
+    }
+
+    private static void AddCandidatePositions(Gamestate state, List<(int x, int y)> candidates,
+        PieceType type, int level, int team)
+    {
+        for (int x = state.leftBound; x <= state.rightBound; x++)
+            for (int y = state.lowerBound; y <= state.upperBound; y++)
+            {
+                Piece p = state[x, y];
+                if (p.type == type && p.thisTeam == team && p.upgradeLevel != level
+                    && p.upgradeLevel + level <= MaxUpgradeLevel(type))
+                    candidates.Add((x, y));
+            }
+    }
+
+    private static void AddEnemyChoices(Gamestate state, List<LotteryChoice> choices,
+        int team, bool excludeKing)
+    {
+        for (int x = state.leftBound; x <= state.rightBound; x++)
+            for (int y = state.lowerBound; y <= state.upperBound; y++)
+            {
+                Piece p = state[x, y];
+                if (p.type != PieceType.Empty && p.type != PieceType.Wall
+                    && p.thisTeam == -team && (!excludeKing || p.type != PieceType.King))
+                    choices.Add(new LotteryChoice(LotteryChoiceType.Piece, x, y));
+            }
+    }
+
+    private static void AddFrozenChoices(Gamestate state, List<LotteryChoice> choices, int team)
+    {
+        for (int x = state.leftBound; x <= state.rightBound; x++)
+            for (int y = state.lowerBound; y <= state.upperBound; y++)
+                if (state[x, y].thisTeam == team && state[x, y].frozenTurns > 0)
+                    choices.Add(new LotteryChoice(LotteryChoiceType.Piece, x, y));
+    }
+
+    private static void AddGenerationChoices(Gamestate state, List<LotteryChoice> choices,
+        int team, PieceType type)
+    {
+        var positions = new List<(int x, int y)>();
+        if (type == PieceType.Cannon)
+        {
+            int[] dx = { 0, 0, 1, -1 };
+            int[] dy = { 1, -1, 0, 0 };
+            for (int x = state.leftBound; x <= state.rightBound; x++)
+                for (int y = state.lowerBound; y <= state.upperBound; y++)
+                {
+                    if (state[x, y].type != PieceType.Pawn || state[x, y].thisTeam != team) continue;
+                    for (int d = 0; d < 4; d++)
+                    {
+                        int nx = x + dx[d], ny = y + dy[d];
+                        if (state.IsValidPosition(nx, ny) && state[nx, ny].type != PieceType.Wall
+                            && !positions.Contains((nx, ny))) positions.Add((nx, ny));
+                    }
+                }
+        }
+        else
+        {
+            for (int x = state.leftBound; x <= state.rightBound; x++)
+                for (int y = state.lowerBound; y <= state.upperBound; y++)
+                    if (IsOnFriendlyBorder(x, y, team)) positions.Add((x, y));
+        }
+
+        positions.RemoveAll(pos =>
+        {
+            Piece target = state[pos.x, pos.y];
+            return target.type == PieceType.Wall
+                || (target.type != PieceType.Empty && target.thisTeam == team && Piece.friendlyFire != 1);
+        });
+
+        if (positions.Count == 1)
+            choices.Add(new LotteryChoice(LotteryChoiceType.Position, positions[0].x, positions[0].y));
+        else
+            for (int i = 0; i < positions.Count; i++)
+                for (int j = i + 1; j < positions.Count; j++)
+                    choices.Add(new LotteryChoice(LotteryChoiceType.TwoPositions,
+                        positions[i].x, positions[i].y, positions[j].x, positions[j].y));
+    }
+
+    private static void AddRookPositionChoices(Gamestate state, List<LotteryChoice> choices, int team)
+    {
+        foreach (var (x, y) in state.GetInitialPositions(PieceType.Rook, team))
+        {
+            Piece target = state[x, y];
+            if (target.type != PieceType.Wall
+                && (target.type == PieceType.Empty || target.thisTeam != team || Piece.friendlyFire == 1))
+                choices.Add(new LotteryChoice(LotteryChoiceType.Position, x, y));
+        }
+    }
+
+    private static void AddReviveChoices(Gamestate state, List<LotteryChoice> choices, int team)
+    {
+        var graveyard = team == 1 ? state.redGraveyard : state.blackGraveyard;
+        for (int i = 0; i < graveyard.Count; i++)
+            foreach (var (x, y) in state.GetInitialPositions(graveyard[i].type, team))
+            {
+                Piece target = state[x, y];
+                if (target.type != PieceType.Wall
+                    && (target.type == PieceType.Empty || target.thisTeam != team || Piece.friendlyFire == 1))
+                    choices.Add(new LotteryChoice(LotteryChoiceType.Revive, x, y, graveyardIndex: i));
+            }
     }
 
     // ================================================================

@@ -40,8 +40,8 @@ public static class StateEncoder
     // ── 动作空间维度（供后续动作编码参考）──
     public const int MoveActionSize = 23716;   // 154 × 154（from × to）
     public const int SniperActionSize = 616;   // 154 × 4（from × 方向）
-    public const int LotteryActionSize = 2820; // 抽奖后续选择
-    public const int TotalActionSize = MoveActionSize + SniperActionSize + LotteryActionSize; // 27152
+    public const int LotteryActionSize = 1; // 抽奖动作本身
+    public const int TotalActionSize = MoveActionSize + SniperActionSize + LotteryActionSize; // 24333
 
     /// <summary>
     /// 把 Gamestate 编码成 22×14×11 的 float 特征（固定红方视角，不翻转）。
@@ -131,12 +131,12 @@ public static class StateEncoder
     {
         switch (type)
         {
-            case PieceType.Rook:   return level == 0 ? 0 : (level == 1 ? 1 : -1);
+            case PieceType.Rook: return level == 0 ? 0 : (level == 1 ? 1 : -1);
             case PieceType.Knight: return level == 0 ? 2 : (level == 1 ? 3 : -1);
             case PieceType.Bishop: return level switch { 0 => 4, 1 => 5, 2 => 6, 3 => 7, _ => -1 };
-            case PieceType.Guard:  return level == 0 ? 8 : (level == 1 ? 9 : -1);
+            case PieceType.Guard: return level == 0 ? 8 : (level == 1 ? 9 : -1);
             case PieceType.Cannon: return level switch { 0 => 10, 1 => 11, 2 => 12, 3 => 13, _ => -1 };
-            case PieceType.Pawn:   return level switch { 0 => 14, 1 => 15, 2 => 16, 3 => 17, _ => -1 };
+            case PieceType.Pawn: return level switch { 0 => 14, 1 => 15, 2 => 16, 3 => 17, _ => -1 };
             default: return -1; // 将/墙不进墓地
         }
     }
