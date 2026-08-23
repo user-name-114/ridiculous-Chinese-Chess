@@ -7,7 +7,6 @@ import glob
 import torch
 import torch.nn.functional as F
 import numpy as np
-import math
 
 from model import ChessNet, MOVE_SIZE, SNIPER_SIZE, LOTTERY_SIZE, TOTAL_ACTION_SIZE, INPUT_CH, BOARD_H, BOARD_W
 
@@ -47,8 +46,7 @@ _builtins.print = _flush_print
 #           + indices(n*i) + probs(n*f) + value(f)
 #
 # 策略标签索引范围 0~24332（移动 23716 + 狙击 616 + 抽奖 1 个标量）。
-# 网络输出 27152 维，训练时前 24332 维直接对应标签，
-# 后 2820 维（抽奖后续选择）log-sum-exp 聚合成 1 个"抽奖"标量。
+# 网络输出 24333 维，与训练标签直接对应。
 # ====================================================================
 
 PAUSE_FLAG = "pause.flag"
@@ -92,24 +90,6 @@ def load_data(data_dir):
     values = np.array(all_values, dtype=np.float32)
     print(f"加载 {len(boards)} 个样本（来自 {len(bin_files)} 个文件）")
     return boards, graveyards, all_policies, values
-
-
-def aggregate_root_policy(policy_logits):
-    """把网络 27152 维输出聚合成根节点 24333 维。
-
-    抽奖段（2820 维）是「抽奖后选哪个格子/复活」的条件选择 logit。
-    必须用 log-mean-exp（= log-sum-exp 减去 log(槽位数)）聚合成 1 个「抽奖」标量：
-    - 不加修正的 log-sum-exp 会多出 log(2820)≈7.94 的固定偏差，让「抽奖」这个动作
-      在 softmax 里被系统性高估（相当于抽奖凭空比每个移动动作高约 8 个 logit），
-      训练几代后网络就会疯狂抽奖，形成正反馈。
-    - 减去 log(2820) 后，「抽奖」的 logit 回到和「移动/狙击」动作同一尺度，
-      反映的是「抽奖后平均能选到多好的目标」，这才是正确含义。
-    """
-    move = policy_logits[:, :MOVE_SIZE]
-    sniper = policy_logits[:, MOVE_SIZE:MOVE_SIZE + SNIPER_SIZE]
-    lottery_sub = policy_logits[:, MOVE_SIZE + SNIPER_SIZE:]  # 2820
-    lottery_scalar = torch.logsumexp(lottery_sub, dim=1, keepdim=True) - math.log(LOTTERY_SIZE)
-    return torch.cat([move, sniper, lottery_scalar], dim=1)  # (B, 24333)
 
 
 def sparse_cross_entropy(logits, indices_list, probs_list):
@@ -215,8 +195,7 @@ def train(config, data, checkpoint_dir, resume_from=None, net_name="latest"):
         policy_logits, v_pred = model(x, g)
         v_pred = v_pred.squeeze(1)
 
-        root_logits = aggregate_root_policy(policy_logits)  # (B, 24333)
-        policy_loss = sparse_cross_entropy(root_logits, b_idx, b_prob)
+        policy_loss = sparse_cross_entropy(policy_logits, b_idx, b_prob)
         value_loss = F.mse_loss(v_pred, v_target)
         loss = policy_loss + value_weight * value_loss
 

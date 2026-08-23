@@ -6,7 +6,7 @@ import torch.nn.functional as F
 # 双头神经网络（策略 + 价值），AlphaZero 风格。
 #
 # 输入：棋盘特征 (B, 22, 14, 11) + 墓地向量 (B, 18)
-# 输出：策略 logits (B, 27152) + 价值 (B, 1) in [-1, 1]
+# 输出：策略 logits (B, 24333) + 价值 (B, 1) in [-1, 1]
 #
 # 动作空间索引（必须与 C# 的 StateEncoder/ActionEncoder 一致）：
 #   移动 0~23715 (from×to)、狙击 23716~24331 (from×方向)、抽奖 24332~27151
@@ -23,10 +23,8 @@ INPUT_CH = 22
 GRAVEYARD = 18
 MOVE_SIZE = 23716        # 154 × 154
 SNIPER_SIZE = 616        # 154 × 4
-LOTTERY_CELL_SLOTS = 18  # 18 个"选格子"槽位，各 154
-LOTTERY_REVIVE = 48      # 复活 48
-LOTTERY_SIZE = LOTTERY_CELL_SLOTS * 154 + LOTTERY_REVIVE  # 2820
-TOTAL_ACTION_SIZE = MOVE_SIZE + SNIPER_SIZE + LOTTERY_SIZE   # 27152
+LOTTERY_SIZE = 1         # 抽奖动作本身
+TOTAL_ACTION_SIZE = MOVE_SIZE + SNIPER_SIZE + LOTTERY_SIZE   # 24333
 
 
 class ResBlock(nn.Module):
@@ -68,13 +66,10 @@ class ChessNet(nn.Module):
         self.sniper_conv2 = nn.Conv2d(256, 4, 1, bias=False)  # 4 方向
 
         # ── 抽奖头：选格子（卷积）+ 复活（全连接）──
-        self.lottery_conv1 = nn.Conv2d(channels, 256, 1, bias=False)
-        self.lottery_bn1 = nn.BatchNorm2d(256)
-        self.lottery_conv2 = nn.Conv2d(256, LOTTERY_CELL_SLOTS, 1, bias=False)  # 18 槽位
         self.lottery_fc = nn.Sequential(
             nn.Linear(channels + GRAVEYARD, 256),
             nn.ReLU(),
-            nn.Linear(256, LOTTERY_REVIVE),  # 复活 48
+            nn.Linear(256, LOTTERY_SIZE),
         )
 
         # ── 价值头 ──
@@ -107,17 +102,8 @@ class ChessNet(nn.Module):
         sniper = sniper.permute(0, 2, 3, 1).reshape(B, SNIPER_SIZE) # from*4+dir
 
         # ── 抽奖头 ──
-        # 注意：这 2820 维不是「2820 个独立动作」，而是「抽奖后选哪个格子/复活」
-        # 的条件选择 logit。抽奖在动作空间里是 1 个动作（与移动/狙击并列），
-        # 因此训练/推理时要用 aggregate_root_policy 把它聚合成 1 个「抽奖」标量
-        # （log-mean-exp = log-sum-exp − log(2820)，否则抽奖会被系统性高估）。
-        lottery_cell = F.relu(self.lottery_bn1(self.lottery_conv1(shared)))
-        lottery_cell = self.lottery_conv2(lottery_cell)             # (B, 18, 14, 11)
-        lottery_cell = lottery_cell.flatten(1)                      # (B, 18*154) slot*154+cell
-        # 复活：全局池化 + 墓地
         pooled = shared.mean(dim=(2, 3))                            # (B, channels)
-        lottery_revive = self.lottery_fc(torch.cat([pooled, graveyard], dim=1))  # (B, 48)
-        lottery = torch.cat([lottery_cell, lottery_revive], dim=1)  # (B, 2820)
+        lottery = self.lottery_fc(torch.cat([pooled, graveyard], dim=1))  # (B, 1)
 
         # ── 价值头 ──
         v = F.relu(self.value_bn(self.value_conv(shared)))          # (B, 1, 14, 11)
@@ -125,6 +111,6 @@ class ChessNet(nn.Module):
         v = torch.tanh(self.value_fc(torch.cat([v, graveyard], dim=1)))  # (B, 1)
 
         # ── 拼接策略 ──
-        policy = torch.cat([move, sniper, lottery], dim=1)          # (B, 27152)
+        policy = torch.cat([move, sniper, lottery], dim=1)          # (B, 24333)
 
         return policy, v

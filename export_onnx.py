@@ -13,7 +13,7 @@ from model import ChessNet, INPUT_CH, BOARD_H, BOARD_W, GRAVEYARD
 #   output.onnx:   导出路径（默认同目录 model.onnx）
 #
 # ONNX 输入:  board (1,22,14,11) + graveyard (1,18)
-# ONNX 输出:  policy (1,27152) + value (1,1)
+# ONNX 输出:  policy (1,24333) + value (1,1)
 # ====================================================================
 
 def load_config(path="config.json"):
@@ -48,7 +48,7 @@ def export(checkpoint_path, onnx_path, config):
     )
     print(f"ONNX 导出成功: {onnx_path}")
     print(f"  输入: board (1,{INPUT_CH},{BOARD_H},{BOARD_W}) + graveyard (1,{GRAVEYARD})")
-    print(f"  输出: policy (1,27152) + value (1,1)")
+    print(f"  输出: policy (1,24333) + value (1,1)")
 
 
 def main():
