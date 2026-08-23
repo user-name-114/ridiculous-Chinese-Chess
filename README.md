@@ -1,2 +1,2 @@
 # ridiculous-Chinese-Chess
-没有readme别看了
+GameManager.cs和RuleEngine为unity内游戏的直接实现，一切规则以它们的表述为准。
