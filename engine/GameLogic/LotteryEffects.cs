@@ -1,5 +1,5 @@
 using System.Collections.Generic;
-//仅包含部分与全局有关的抽奖内容，其余参考LotteryResolver，或者gamemanager。
+
 //纯数据文件，不含unity相关内容
 public static class LotteryEffects
 {
@@ -66,7 +66,7 @@ public static class LotteryEffects
 
         // currentTeam 保持不变，由 GameManager 在效果结束后切换
     }
-    /// 洪水：击杀楚河汉界两边行（y=4 和 y=5）上的所有棋子。
+    /// 洪水：击杀楚河汉界两边行（y=4 和 y=5）上的所有棋子（墙除外）。
     public static void Flood(Gamestate state)
     {
         int[] floodRows = { 4, 5 }; // 楚河汉界两侧
@@ -158,6 +158,7 @@ public static class LotteryEffects
                     }
                 }
             }
+            // 注：原代码中 else if (target.type != PieceType.Empty) 分支永不执行，已删除
 
             if (canGo)
                 finalMoves.Add((pawn, tx, ty));

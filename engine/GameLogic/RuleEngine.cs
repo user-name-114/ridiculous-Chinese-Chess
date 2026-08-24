@@ -609,12 +609,10 @@ public class King : Piece
             {
                 int dist = Math.Abs(thisx - x2) + Math.Abs(thisy - y2);
                 int maxRange = upgradeLevel == 1 ? 2 : 3;
-                if (dist <= maxRange)
-                {
-                    bool crossRiver = (thisTeam == 1 && y2 > 4) || (thisTeam == -1 && y2 < 5);
-                    if (!crossRiver)
-                        return IsTargetValidForRookMove(x2, y2, state);
-                }
+                if (dist > maxRange) return false;
+                bool crossRiver = (thisTeam == 1 && y2 > 4) || (thisTeam == -1 && y2 < 5);
+                if (!crossRiver)
+                    return IsTargetValidForRookMove(x2, y2, state);
             }
             if (CanFlyGeneral(x2, y2, state)) return true;
         }
