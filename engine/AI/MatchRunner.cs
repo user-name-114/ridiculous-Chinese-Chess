@@ -70,8 +70,7 @@ public static class MatchRunner
             state.prepareModeOn = false;
         }
 
-        var seenStates = new Dictionary<long, int>(); // 重复局面检测
-        seenStates[MctsEngine.RepetitionKey(state)] = 1;
+        var repetitionTracker = new RepetitionTracker(state);
 
         for (int moveCount = 0; moveCount < maxMoves; moveCount++)
         {
@@ -140,12 +139,10 @@ public static class MatchRunner
             else
                 action.Execute(state, rng);
 
-            // 重复局面判负：同一局面出现 3 次，判"刚走的一方"负
-            long rk = MctsEngine.RepetitionKey(state);
-            seenStates.TryGetValue(rk, out int rc);
-            rc++;
-            seenStates[rk] = rc;
-            if (rc >= 3)
+            // 最近 30 步内同一局面出现第 3 次，判"刚走的一方"负
+            bool countRepetition = !(action is LotteryAction lottery
+                && lottery.lastOutcome >= 36);
+            if (repetitionTracker.AddState(state, countRepetition))
             {
                 // 默认判"刚走的一方"负；若指定 repetitionLoser（评测时固定为 onnx），则固定判该方负
                 int loser = repetitionLoser != 0 ? repetitionLoser : team;

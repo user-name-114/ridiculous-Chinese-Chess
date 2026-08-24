@@ -68,7 +68,8 @@ public static class SelfPlayTrainer
                 Console.WriteLine($"开始第 {gameIdx + 1}/{numGames} 局");
                 var sw = System.Diagnostics.Stopwatch.StartNew();
                 int moves = RunSingleGame(gameIdx, numSims, mctsThreads, dataDir, neural,
-                    dirichletAlpha, dirichletEpsilon, temperature, tempThreshold, cpuct, maxMoves);
+                    dirichletAlpha, dirichletEpsilon, temperature, tempThreshold, cpuct, maxMoves,
+                    pauseFlag);
                 sw.Stop();
                 Console.WriteLine($"第 {gameIdx + 1}/{numGames} 局完成，用时 {sw.Elapsed.TotalSeconds:F1} 秒，步数 {moves}");
 
@@ -89,7 +90,7 @@ public static class SelfPlayTrainer
     private static int RunSingleGame(int gameIdx, int numSims, int mctsThreads,
         string dataDir, NeuralMcts neural, double dirichletAlpha,
         double dirichletEpsilon, double temperature, int tempThreshold, double cpuct,
-        int maxMoves)
+        int maxMoves, string pauseFlag)
     {
         var red = new AIPlayer(numSims, C: cpuct, seed: gameIdx * 2 + 1,
             aiTeam: 1, threadCount: mctsThreads, neural: neural,
@@ -107,12 +108,14 @@ public static class SelfPlayTrainer
         var policies = new List<(int[] indices, float[] probs)>();
 
         int winner = 0;
-        var seenStates = new Dictionary<long, int>(); // 重复局面检测
-        seenStates[MctsEngine.RepetitionKey(state)] = 1;
+        var repetitionTracker = new RepetitionTracker(state);
 
         int move;
         for (move = 0; move < maxMoves; move++)
         {
+            while (File.Exists(pauseFlag))
+                System.Threading.Thread.Sleep(300);
+
             if (MctsEngine.IsTerminal(state))
             {
                 winner = -state.currentTeam; // 当前方被将死，对方胜
@@ -148,12 +151,10 @@ public static class SelfPlayTrainer
             if (best == null) break;
             ai.ExecuteAction(state, best);
 
-            // 重复局面判负：同一局面出现 3 次，判"刚走的一方"负（避免长捉来回走子）
-            long rk = MctsEngine.RepetitionKey(state);
-            seenStates.TryGetValue(rk, out int rc);
-            rc++;
-            seenStates[rk] = rc;
-            if (rc >= 3)
+            // 最近 30 步内同一局面出现第 3 次，判"刚走的一方"负
+            bool countRepetition = !(best is LotteryAction lottery
+                && lottery.lastOutcome >= 36);
+            if (repetitionTracker.AddState(state, countRepetition))
             {
                 winner = state.currentTeam; // 刚走的一方（-currentTeam）重复走子，判负，对手胜
                 break;

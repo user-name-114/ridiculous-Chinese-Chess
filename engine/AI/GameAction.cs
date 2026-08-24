@@ -126,12 +126,14 @@ public class SniperAction : GameAction
 // ====================================================================
 public class LotteryAction : GameAction
 {
+    public int lastOutcome;
+
     public LotteryAction(int team) { this.team = team; }
 
     public override void Execute(Gamestate state, System.Random rng)
     {
-        int outcome = rng.Next(1, 41);
-        LotteryResolver.Resolve(state, outcome, rng);
+        lastOutcome = rng.Next(1, 41);
+        LotteryResolver.Resolve(state, lastOutcome, rng);
         EndTurn(state);
     }
 

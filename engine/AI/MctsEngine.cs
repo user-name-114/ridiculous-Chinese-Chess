@@ -17,6 +17,47 @@ using System.Threading.Tasks;
 //       useLotteryChanceNodes: true, threadCount: 16);
 //   GameAction best = engine.FindBestAction(state, rng);
 // ====================================================================
+public sealed class RepetitionTracker
+{
+    public const int WindowSize = 30;
+    private readonly Dictionary<long, int> counts = new Dictionary<long, int>();
+    private readonly Queue<(int ply, long key, bool counted)> recent =
+        new Queue<(int ply, long key, bool counted)>();
+    private int ply;
+
+    public RepetitionTracker(Gamestate state)
+    {
+        long key = MctsEngine.RepetitionKey(state);
+        counts[key] = 1;
+        recent.Enqueue((0, key, true));
+    }
+
+    public bool AddState(Gamestate state, bool countForRepetition)
+    {
+        ply++;
+        long key = MctsEngine.RepetitionKey(state);
+        recent.Enqueue((ply, key, countForRepetition));
+
+        if (countForRepetition)
+        {
+            counts.TryGetValue(key, out int count);
+            count++;
+            counts[key] = count;
+        }
+
+        while (recent.Count > 0 && recent.Peek().ply < ply - WindowSize)
+        {
+            var old = recent.Dequeue();
+            if (!old.counted) continue;
+            counts[old.key]--;
+            if (counts[old.key] == 0)
+                counts.Remove(old.key);
+        }
+
+        return countForRepetition && counts[key] >= 3;
+    }
+}
+
 public class MctsEngine
 {
     private int maxSimulations;
@@ -76,7 +117,12 @@ public class MctsEngine
     public void ExecuteAction(Gamestate state, GameAction action, System.Random rng)
     {
         if (action is LotteryAction)
-            ExecuteLottery(state, rng);
+        {
+            var lottery = (LotteryAction)action;
+            lottery.lastOutcome = rng.Next(1, 41);
+            ExecuteLotteryOutcome(state, lottery.lastOutcome, rng);
+            GameAction.EndTurn(state);
+        }
         else
             action.Execute(state, rng);
     }
@@ -151,7 +197,9 @@ public class MctsEngine
             { throw new Exception($"DeepClone failed at sim {i}: {ex.Message}", ex); }
 
             MctsNode leaf;
-            try { leaf = Select(root, workState, rng); }
+            bool repetitionLoss;
+            var repetitionTracker = new RepetitionTracker(workState);
+            try { leaf = Select(root, workState, rng, repetitionTracker, out repetitionLoss); }
             catch (Exception ex)
             { throw new Exception($"Select failed at sim {i}: {ex.Message}", ex); }
 
@@ -159,7 +207,9 @@ public class MctsEngine
             float[] priors = null;
             try
             {
-                if (IsTerminal(workState))
+                if (repetitionLoss)
+                    result = 1;
+                else if (IsTerminal(workState))
                     result = Evaluate(workState);
                 else if (neural != null)
                 {
@@ -200,14 +250,19 @@ public class MctsEngine
     //  这样可以探索"抽奖后下一步该怎么走"，而非直接 rollout。
     // ================================================================
 
-    private MctsNode Select(MctsNode node, Gamestate state, System.Random rng)
+    private MctsNode Select(MctsNode node, Gamestate state, System.Random rng,
+        RepetitionTracker repetitionTracker, out bool repetitionLoss)
     {
+        repetitionLoss = false;
         while (!IsTerminal(state))
         {
             // ── ChanceNode: 随机采样 outcome，创建子节点，继续深入 ──
             if (node.IsChanceNode)
             {
-                MctsNode result = HandleChanceNode(node, state, rng);
+                MctsNode result = HandleChanceNode(node, state, rng, repetitionTracker,
+                    out repetitionLoss);
+                if (repetitionLoss)
+                    return result;
                 if (result == node)
                     return node;          // PW 限制达到，叶节点
                 node = result;            // outcome 子节点，继续循环
@@ -230,6 +285,13 @@ public class MctsEngine
                 return node;
 
             ExecuteAction(state, node.action, rng);
+            bool countRepetition = !(node.action is LotteryAction lottery
+                && lottery.lastOutcome >= 36);
+            if (repetitionTracker.AddState(state, countRepetition))
+            {
+                repetitionLoss = true;
+                return node;
+            }
         }
 
         return node; // 终局
@@ -244,12 +306,22 @@ public class MctsEngine
     //  返回 outcome 子节点（继续深入）或原节点（PW 限制，叶节点）。
     // ================================================================
 
-    private MctsNode HandleChanceNode(MctsNode node, Gamestate state, System.Random rng)
+    private MctsNode HandleChanceNode(MctsNode node, Gamestate state, System.Random rng,
+        RepetitionTracker repetitionTracker, out bool repetitionLoss)
     {
+        repetitionLoss = false;
         int outcome = rng.Next(1, 41);
         node.sampledOutcome = outcome;
+        ((LotteryAction)node.action).lastOutcome = outcome;
 
         ExecuteLotteryOutcome(state, outcome, rng);
+        GameAction.EndTurn(state);
+
+        if (repetitionTracker.AddState(state, outcome < 36))
+        {
+            repetitionLoss = true;
+            return node;
+        }
 
         // 查找已有 outcome 子节点
         if (node.outcomeChildren == null)
@@ -297,26 +369,46 @@ public class MctsEngine
     {
         LotteryChoice bestChoice = choices[0];
         double bestOpponentValue = double.PositiveInfinity;
+        var candidates = new List<Gamestate>(choices.Count);
+        var valueStates = new List<Gamestate>();
+        var valueIndices = new List<int>();
 
-        foreach (LotteryChoice choice in choices)
+        for (int i = 0; i < choices.Count; i++)
         {
+            LotteryChoice choice = choices[i];
             Gamestate candidate = state.DeepClone();
             LotteryResolver.ResolveChoice(candidate, outcome, choice);
             GameAction.EndTurn(candidate);
+            candidates.Add(candidate);
 
-            double opponentValue;
             if (IsTerminal(candidate))
-                opponentValue = -Evaluate(candidate);
+                continue;
+
+            valueIndices.Add(i);
+            valueStates.Add(candidate);
+        }
+
+        float[] predictedValues = valueStates.Count == 0
+            ? Array.Empty<float>()
+            : neural.PredictValues(valueStates);
+
+        int valueIndex = 0;
+        for (int i = 0; i < candidates.Count; i++)
+        {
+            double opponentValue;
+            if (IsTerminal(candidates[i]))
+                opponentValue = Evaluate(candidates[i]);
             else
             {
-                var prediction = neural.Predict(candidate);
-                opponentValue = candidate.currentTeam == 1 ? prediction.value : -prediction.value;
+                float predictedValue = predictedValues[valueIndex++];
+                opponentValue = candidates[i].currentTeam == 1
+                    ? predictedValue : -predictedValue;
             }
 
             if (opponentValue < bestOpponentValue)
             {
                 bestOpponentValue = opponentValue;
-                bestChoice = choice;
+                bestChoice = choices[i];
             }
         }
 
@@ -495,21 +587,22 @@ public class MctsEngine
     // ================================================================
     //  Backpropagate — 模拟结果沿路径回传
     //
-    //  零和博弈：在决策节点间翻转 value（对手视角）。
-    //  关键：ChanceNode（随机事件）和 outcome 子节点（无 action）
-    //  不翻转符号——它们不是对手的决策。
+    //  零和博弈：经过一个已执行的动作节点时翻转 value 视角。
+    //  outcome 子节点没有 action，不额外翻转；其父 ChanceNode 代表抽奖动作，
+    //  会像普通动作一样完成一次视角转换。
     // ================================================================
 
     private void Backpropagate(MctsNode node, double result)
     {
         while (node != null)
         {
+            // 叶节点 value 属于动作执行后的当前行动方；动作节点需要先转换
+            // 回执行该动作一方的视角，再写入自身统计值。
+            if (node.action != null)
+                result = -result;
+
             node.visitCount++;
             node.totalValue += result;
-
-            // 仅在决策节点翻转（有 action 且非 ChanceNode）
-            if (node.action != null && !node.IsChanceNode)
-                result = -result;
 
             node = node.parent;
         }
@@ -581,15 +674,14 @@ public class MctsEngine
         return !HasKing(state, 1) || !HasKing(state, -1);
     }
 
-    /// <summary>从最后行动者视角评估: +1 胜 / -1 负 / 0 其他</summary>
+    /// <summary>从当前行动方视角评估: +1 胜 / -1 负 / 0 其他</summary>
     public static double Evaluate(Gamestate state)
     {
-        int lastActor = -state.currentTeam;
-        bool lastActorKing = HasKing(state, lastActor);
-        bool nextKing = HasKing(state, state.currentTeam);
+        bool currentKing = HasKing(state, state.currentTeam);
+        bool otherKing = HasKing(state, -state.currentTeam);
 
-        if (!nextKing && lastActorKing) return +1;
-        if (!lastActorKing && nextKing) return -1;
+        if (!currentKing && otherKing) return -1;
+        if (!otherKing && currentKing) return +1;
         return 0;
     }
 
@@ -602,28 +694,86 @@ public class MctsEngine
         return false;
     }
 
-    /// <summary>局面哈希（仅棋子位置+类型+阵营），用于重复检测</summary>
+    /// <summary>完整局面哈希，用于重复检测</summary>
     public static long StateHash(Gamestate state)
     {
-        long hash = 17;
+        unchecked
+        {
+            long hash = 1469598103934665603L;
+            AddHash(ref hash, state.leftBound);
+            AddHash(ref hash, state.rightBound);
+            AddHash(ref hash, state.lowerBound);
+            AddHash(ref hash, state.upperBound);
+            AddHash(ref hash, state.isBoardExpanded);
+            AddHash(ref hash, state.prepareModeOn);
+            AddHash(ref hash, state.prepareLotteryCount);
+            AddHash(ref hash, state.currentTeam);
+            AddHash(ref hash, state.lianHuanMaTeam);
+
+            for (int i = 0; i < state.lianHuanMaTargets.Count; i++)
+            {
+                AddHash(ref hash, state.lianHuanMaTargets[i].x);
+                AddHash(ref hash, state.lianHuanMaTargets[i].y);
+            }
+
+            AddBoardHash(ref hash, state);
+            AddGraveyardHash(ref hash, state.redGraveyard);
+            AddGraveyardHash(ref hash, state.blackGraveyard);
+            return hash;
+        }
+    }
+
+    private static void AddBoardHash(ref long hash, Gamestate state)
+    {
         for (int x = state.leftBound; x <= state.rightBound; x++)
             for (int y = state.lowerBound; y <= state.upperBound; y++)
             {
                 Piece p = state[x, y];
-                if (p.type == PieceType.Empty) continue;
-                long v = ((long)(int)p.type * 1000000)
-                       + ((long)(p.thisTeam + 1) * 100000)
-                       + ((long)x * 1000)
-                       + (long)y;
-                hash = hash * 31 + v;
+                AddPieceHash(ref hash, p);
             }
-        return hash;
     }
 
-    /// <summary>重复检测键：棋子布局哈希 + 当前行动方（区分「红走此布局」和「黑走此布局」）</summary>
+    private static void AddGraveyardHash(ref long hash, List<Piece> graveyard)
+    {
+        AddHash(ref hash, graveyard.Count);
+        foreach (Piece piece in graveyard)
+            AddPieceHash(ref hash, piece);
+    }
+
+    private static void AddPieceHash(ref long hash, Piece piece)
+    {
+        AddHash(ref hash, (int)piece.type);
+        AddHash(ref hash, piece.thisTeam);
+        AddHash(ref hash, piece.isDead);
+        AddHash(ref hash, piece.thisx);
+        AddHash(ref hash, piece.thisy);
+        AddHash(ref hash, piece.upgradeLevel);
+        AddHash(ref hash, piece.frozenTurns);
+        AddHash(ref hash, piece.freezeTickCount);
+        if (piece is Pawn pawn)
+        {
+            AddHash(ref hash, pawn.sniperCooldown);
+            AddHash(ref hash, pawn.sniperAvailable);
+        }
+        if (piece is Wall wall)
+            AddHash(ref hash, wall.wallDuration);
+    }
+
+    private static void AddHash(ref long hash, int value)
+    {
+        hash ^= (uint)value;
+        hash *= 1099511628211L;
+    }
+
+    private static void AddHash(ref long hash, bool value)
+    {
+        AddHash(ref hash, value ? 1 : 0);
+    }
+
+    /// <summary>重复检测键：完整局面哈希（已包含当前行动方）</summary>
     public static long RepetitionKey(Gamestate state)
     {
-        return StateHash(state) ^ ((long)state.currentTeam << 62);
+        return StateHash(state);
     }
 
     // ================================================================
