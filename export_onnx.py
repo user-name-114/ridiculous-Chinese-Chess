@@ -3,6 +3,12 @@ import os
 import sys
 import torch
 
+try:
+    sys.stdout.reconfigure(encoding="utf-8", write_through=True)
+    sys.stderr.reconfigure(encoding="utf-8")
+except Exception:
+    pass
+
 from model import ChessNet, INPUT_CH, BOARD_H, BOARD_W, GRAVEYARD
 
 # ====================================================================
@@ -32,7 +38,7 @@ def export(checkpoint_path, onnx_path, config):
     model.eval()
     print(f"已加载 checkpoint（step={ckpt.get('step', '?')}）")
 
-    # 固定 batch=1（推理时单局面对弈）
+    # 支持 batch=1 以及抽奖候选 state 的批量价值评估
     dummy_board = torch.randn(1, INPUT_CH, BOARD_H, BOARD_W)
     dummy_graveyard = torch.randn(1, GRAVEYARD)
 
@@ -42,6 +48,12 @@ def export(checkpoint_path, onnx_path, config):
         onnx_path,
         input_names=["board", "graveyard"],
         output_names=["policy", "value"],
+        dynamic_axes={
+            "board": {0: "batch"},
+            "graveyard": {0: "batch"},
+            "policy": {0: "batch"},
+            "value": {0: "batch"},
+        },
         opset_version=13,
         do_constant_folding=True,
         dynamo=False,  # 用旧版导出器，避免依赖 onnxscript

@@ -44,8 +44,8 @@ PARAM_INFO = {
     "selfplay.dirichlet_alpha": ("Dirichlet α", "开局探索噪声强度，越大越鼓励尝试新走法", False),
     "selfplay.dirichlet_epsilon": ("Dirichlet ε", "噪声占先验概率的比例（0~1），越大越随机", False),
     "selfplay.max_moves": ("最大步数", "单局最大步数，超时判和", False),
-    "selfplay.parallel_games": ("并行局数", "同时自对弈几局（外层并行），接近 CPU 核数利用率最高", False),
-    "selfplay.mcts_threads": ("每局MCTS线程", "每局内部 MCTS 用多少线程（内层并行）", False),
+    "selfplay.parallel_games": ("并行局数", "同时自对弈几局（外层并行）；并行局数 × 每局MCTS线程不宜超过 CPU 可承受线程数", False),
+    "selfplay.mcts_threads": ("每局MCTS线程", "每局内部 MCTS 用多少线程（内层并行）；并行局数 × 此值不宜超过 CPU 可承受线程数", False),
 }
 
 
@@ -583,8 +583,9 @@ class Panel:
             messagebox.showerror("错误", "训练局数必须 > 0")
             return
 
-        # 网络名称（训练后保存为 名称.pt/.onnx）
-        self.net_name = self.net_name_var.get().strip() or "latest"
+        # 网络名称（允许用户输入带或不带 .pt/.onnx 后缀）
+        self.net_name = self.normalize_network_name(self.net_name_var.get())
+        self.net_name_var.set(self.net_name)
 
         # 创建数据文件夹（日期-时间）
         ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -817,19 +818,21 @@ class Panel:
                 self.train_progress.set(100, "完成 (100%)")
 
             # 导出 onnx（供下一代自对弈用网络指导），并记录 resume 指针
-            net_name = getattr(self, "net_name", "latest") or "latest"
+            net_name = self.normalize_network_name(getattr(self, "net_name", "latest"))
             pt_path = os.path.join(self.data_dir, f"{net_name}.pt")
             if os.path.exists(pt_path):
                 onnx_out = os.path.join(self.data_dir, f"{net_name}.onnx")
                 self.log("导出 ONNX 模型供下一代自对弈…")
-                self._export_onnx(pt_path, onnx_out)
+                export_ok = self._export_onnx(pt_path, onnx_out)
                 self._resume_pt = pt_path
-                if os.path.exists(onnx_out):
+                if export_ok and os.path.exists(onnx_out):
                     self._resume_onnx = onnx_out
                     self.log("ONNX 导出成功，下一代将用网络指导自对弈")
                 else:
                     self._resume_onnx = None
-                    self.log("ONNX 导出失败，下一代将退回纯 MCTS")
+                    self.log(f"ONNX 导出失败：未生成 {os.path.basename(onnx_out)}，下一代将退回纯 MCTS")
+            else:
+                self.log(f"找不到训练输出 {os.path.basename(pt_path)}，跳过 ONNX 导出")
             self.generation += 1
 
         # 状态切换（一定执行）
@@ -851,6 +854,15 @@ class Panel:
             kind = "初始化" if self.generation - 1 == 0 else "更新"
             self.log(f"{kind}完成，用时 {total_sec} 秒，网络文件已保存")
 
+    @staticmethod
+    def normalize_network_name(name):
+        """统一用户输入的网络文件名，避免生成 latest.pt 或名称.pt.pt。"""
+        name = (name or "").strip()
+        for suffix in (".onnx", ".pt"):
+            if name.lower().endswith(suffix):
+                name = name[:-len(suffix)].rstrip()
+        return name or "latest"
+
     def _export_onnx(self, pt_path, onnx_path):
         """调用 export_onnx.py 把 .pt 导出成 .onnx（供网络指导自对弈）。"""
         no_window = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
@@ -860,11 +872,16 @@ class Panel:
                 capture_output=True, text=True, encoding="utf-8",
                 errors="replace", timeout=600, creationflags=no_window,
                 cwd=BASE_DIR)
+            output = "\n".join(part for part in (r.stdout, r.stderr) if part).strip()
+            if output:
+                self.log(f"ONNX 导出日志：{output[-1000:]}")
             if r.returncode != 0:
-                err = (r.stderr or "").strip()[-200:]
-                self.log(f"ONNX 导出失败: {err}")
+                self.log(f"ONNX 导出进程失败（退出码 {r.returncode}）")
+                return False
+            return os.path.exists(onnx_path)
         except Exception as e:
             self.log(f"ONNX 导出异常: {e}")
+            return False
 
     def save_result_txt(self, folder, interrupted):
         cfg = load_config()
@@ -907,7 +924,9 @@ class Panel:
             return
         self._resume_pt = _pt_files[0]
         # 网络名 = .pt 文件名（不含扩展名）
-        self.net_name = os.path.splitext(os.path.basename(self._resume_pt))[0]
+        self.net_name = self.normalize_network_name(
+            os.path.splitext(os.path.basename(self._resume_pt))[0])
+        self.net_name_var.set(self.net_name)
 
         # 读快照里的超参数
         with open(snapshot_path, "r", encoding="utf-8") as f:
@@ -1189,9 +1208,13 @@ class Panel:
             cmd.append(self._resume_pt)
             self.log(f"续训：从 {os.path.basename(self._resume_pt)} 加载网络继续训练")
         else:
+            # train.py 的第 3 个位置参数是 resume_from，需保留空位给网络名称
+            cmd.append("")
             self.log("阶段2：网络初始化训练（数据收集完成）")
         # 网络保存名称（第 4 个参数）
         cmd.append(getattr(self, "net_name", "latest") or "latest")
+        logf.write(f"[panel] 网络名称: {self.normalize_network_name(getattr(self, 'net_name', 'latest'))}\n")
+        logf.flush()
         self.train_process = subprocess.Popen(cmd, stdout=logf, stderr=logf,
                                               creationflags=no_window)
         self._train_log_path = train_log
