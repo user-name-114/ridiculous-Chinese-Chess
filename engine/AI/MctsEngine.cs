@@ -213,7 +213,7 @@ public class MctsEngine
                     result = Evaluate(workState);
                 else if (neural != null)
                 {
-                    var (p, v) = neural.Predict(workState);
+                    var (p, v) = neural.PredictBlocking(workState);
                     priors = p;
                     result = v;
                     // 网络 value 是固定红方视角，转成叶节点玩家视角（黑方时取反）

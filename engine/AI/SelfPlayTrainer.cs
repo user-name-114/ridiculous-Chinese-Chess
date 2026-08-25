@@ -32,61 +32,63 @@ public static class SelfPlayTrainer
         int parallelGames, string dataDir, string progressFile, string pauseFlag,
         string onnxPath = null, double dirichletAlpha = 0.3,
         double dirichletEpsilon = 0.25, double temperature = 1.0,
-        int tempThreshold = 15, double cpuct = 1.2, int maxMoves = 400)
+        int tempThreshold = 15, double cpuct = 1.2, int maxMoves = 400,
+        int neuralBatchSize = 32, int neuralBatchTimeoutMs = 2)
     {
         Directory.CreateDirectory(dataDir);
-        // 预分配线程池线程，避免嵌套 Parallel.For（外层×内层）线程饥饿
-        System.Threading.ThreadPool.SetMinThreads(parallelGames * mctsThreads + 4,
-                                                  parallelGames * mctsThreads + 4);
 
-        // 加载神经网络指导自对弈（AlphaZero 迭代：上一代网络指导下一代数据收集）
-        if (!string.IsNullOrEmpty(onnxPath) && File.Exists(onnxPath))
+        bool hasOnnxPath = !string.IsNullOrEmpty(onnxPath) && File.Exists(onnxPath);
+        if (!string.IsNullOrEmpty(onnxPath) && !hasOnnxPath)
+            Console.WriteLine($"[警告] 网络文件不存在，退回纯 MCTS: {onnxPath}");
+
+        // ── 创建一个共享的 NeuralMcts 实例 ──
+        // 所有对局共享同一个 ONNX Session + 流水线批量推理。
+        NeuralMcts sharedNeural = null;
+        if (hasOnnxPath)
         {
+            sharedNeural = new NeuralMcts(onnxPath);
+            sharedNeural.StartBatchService(neuralBatchSize, neuralBatchTimeoutMs);
             Console.WriteLine($"已加载网络指导自对弈: {onnxPath}");
         }
-        else if (!string.IsNullOrEmpty(onnxPath))
+
+        // ── 扁平化并行（神经网络模式）──
+        // 消除嵌套 Parallel.For：parallelGames 个外层线程阻塞等待内层完成，纯浪费。
+        // 展开为 parallelGames×mctsThreads 个扁平并行对局，每局 1 线程 MCTS。
+        int effectiveParallel = parallelGames;
+        int effectiveThreads = mctsThreads;
+        if (hasOnnxPath)
         {
-            Console.WriteLine($"[警告] 网络文件不存在，退回纯 MCTS: {onnxPath}");
+            effectiveThreads = 1;
+            effectiveParallel = parallelGames * mctsThreads;
+            Console.WriteLine($"[神经网络模式] 扁平化: {effectiveParallel} 局 × 1 线程" +
+                              $"（原 {parallelGames} × {mctsThreads}，消除 {parallelGames} 个阻塞外层线程）");
         }
 
-        // 注意：NeuralMcts 不再在这里创建，改为每局内部独立创建
-        bool hasOnnxPath = !string.IsNullOrEmpty(onnxPath);
+        int totalThreads = effectiveParallel * effectiveThreads;
+        System.Threading.ThreadPool.SetMinThreads(totalThreads + 4, totalThreads + 4);
 
         Console.WriteLine($"自对弈 {numGames} 局 | 每步 {numSims} sims | " +
-                          $"{parallelGames} 局并行 × {mctsThreads} MCTS 线程" +
-                          (hasOnnxPath ? " | 网络指导（每局独立 Session）" : " | 纯 MCTS"));
+                          $"{effectiveParallel} 局并行 × {effectiveThreads} MCTS 线程 = {totalThreads} 线程" +
+                          (hasOnnxPath
+                              ? $" | 共享 1 Session + 流水线批量推理(batch={neuralBatchSize})"
+                              : " | 纯 MCTS"));
 
         int completed = 0;
 
         Parallel.For(0, numGames,
-            new ParallelOptions { MaxDegreeOfParallelism = parallelGames },
+            new ParallelOptions { MaxDegreeOfParallelism = effectiveParallel },
             gameIdx =>
             {
-                // 暂停检测：pause.flag 存在则空转等待
                 while (File.Exists(pauseFlag))
                     System.Threading.Thread.Sleep(300);
 
-                // 每局独立创建 ONNX Session，拥有独立的 CUDA 执行流
-                NeuralMcts localNeural = null;
-                if (hasOnnxPath && File.Exists(onnxPath))
-                {
-                    localNeural = new NeuralMcts(onnxPath);
-                }
-                else if (hasOnnxPath)
-                {
-                    Console.WriteLine($"[Game {gameIdx}] [警告] 网络文件不存在，退回纯 MCTS: {onnxPath}");
-                }
-
                 Console.WriteLine($"开始第 {gameIdx + 1}/{numGames} 局");
                 var sw = System.Diagnostics.Stopwatch.StartNew();
-                int moves = RunSingleGame(gameIdx, numSims, mctsThreads, dataDir, localNeural,
+                int moves = RunSingleGame(gameIdx, numSims, effectiveThreads, dataDir, sharedNeural,
                     dirichletAlpha, dirichletEpsilon, temperature, tempThreshold, cpuct, maxMoves,
                     pauseFlag);
                 sw.Stop();
                 Console.WriteLine($"第 {gameIdx + 1}/{numGames} 局完成，用时 {sw.Elapsed.TotalSeconds:F1} 秒，步数 {moves}");
-
-                // 对局结束后立即释放该局的 Session 和 GPU 显存
-                localNeural?.Dispose();
 
                 int done = System.Threading.Interlocked.Increment(ref completed);
                 if (progressFile != null)
@@ -95,6 +97,9 @@ public static class SelfPlayTrainer
                     catch { /* 忽略写进度失败 */ }
                 }
             });
+
+        // 所有对局完成后，停止批量推理服务并释放共享 Session
+        sharedNeural?.Dispose();
 
         if (progressFile != null)
             try { File.WriteAllText(progressFile, $"{numGames}/{numGames}"); } catch { }
