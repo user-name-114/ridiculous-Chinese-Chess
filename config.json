@@ -26,7 +26,9 @@
     "dirichlet_alpha": 0.3,
     "dirichlet_epsilon": 0.25,
     "max_moves": 300,
-    "parallel_games": 24,
-    "mcts_threads": 4
+    "parallel_games": 32,
+    "mcts_threads": 1,
+    "neural_batch_size": 32,
+    "neural_batch_timeout_ms": 2
   }
 }

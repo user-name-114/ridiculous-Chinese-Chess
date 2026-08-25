@@ -44,8 +44,10 @@ PARAM_INFO = {
     "selfplay.dirichlet_alpha": ("Dirichlet α", "开局探索噪声强度，越大越鼓励尝试新走法", False),
     "selfplay.dirichlet_epsilon": ("Dirichlet ε", "噪声占先验概率的比例（0~1），越大越随机", False),
     "selfplay.max_moves": ("最大步数", "单局最大步数，超时判和", False),
-    "selfplay.parallel_games": ("并行局数", "同时自对弈几局（外层并行）；并行局数 × 每局MCTS线程不宜超过 CPU 可承受线程数", False),
-    "selfplay.mcts_threads": ("每局MCTS线程", "每局内部 MCTS 用多少线程（内层并行）；并行局数 × 此值不宜超过 CPU 可承受线程数", False),
+    "selfplay.parallel_games": ("并行局数", "同时自对弈几局；并行局数 × 每局MCTS线程 = 总线程数，建议等于CPU逻辑核心数", False),
+    "selfplay.mcts_threads": ("每局MCTS线程", "每局内部MCTS并行线程数。神经网络模式下多线程共享批量推理队列，不再竞争GPU", False),
+    "selfplay.neural_batch_size": ("神经网络批量大小", "GPU一次推理处理多少个局面。越大GPU利用率越高，但延迟也越高。32核CPU建议32~64", False),
+    "selfplay.neural_batch_timeout_ms": ("批量超时(ms)", "收集批量请求的最长等待毫秒数。越短延迟越低但批量可能不满，越长批量越满但线程等待更久", False),
 }
 
 
