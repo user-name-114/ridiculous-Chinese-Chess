@@ -40,10 +40,8 @@ public static class SelfPlayTrainer
                                                   parallelGames * mctsThreads + 4);
 
         // 加载神经网络指导自对弈（AlphaZero 迭代：上一代网络指导下一代数据收集）
-        NeuralMcts neural = null;
         if (!string.IsNullOrEmpty(onnxPath) && File.Exists(onnxPath))
         {
-            neural = new NeuralMcts(onnxPath);
             Console.WriteLine($"已加载网络指导自对弈: {onnxPath}");
         }
         else if (!string.IsNullOrEmpty(onnxPath))
@@ -51,9 +49,12 @@ public static class SelfPlayTrainer
             Console.WriteLine($"[警告] 网络文件不存在，退回纯 MCTS: {onnxPath}");
         }
 
+        // 注意：NeuralMcts 不再在这里创建，改为每局内部独立创建
+        bool hasOnnxPath = !string.IsNullOrEmpty(onnxPath);
+
         Console.WriteLine($"自对弈 {numGames} 局 | 每步 {numSims} sims | " +
                           $"{parallelGames} 局并行 × {mctsThreads} MCTS 线程" +
-                          (neural != null ? " | 网络指导" : " | 纯 MCTS"));
+                          (hasOnnxPath ? " | 网络指导（每局独立 Session）" : " | 纯 MCTS"));
 
         int completed = 0;
 
@@ -65,13 +66,27 @@ public static class SelfPlayTrainer
                 while (File.Exists(pauseFlag))
                     System.Threading.Thread.Sleep(300);
 
+                // 每局独立创建 ONNX Session，拥有独立的 CUDA 执行流
+                NeuralMcts localNeural = null;
+                if (hasOnnxPath && File.Exists(onnxPath))
+                {
+                    localNeural = new NeuralMcts(onnxPath);
+                }
+                else if (hasOnnxPath)
+                {
+                    Console.WriteLine($"[Game {gameIdx}] [警告] 网络文件不存在，退回纯 MCTS: {onnxPath}");
+                }
+
                 Console.WriteLine($"开始第 {gameIdx + 1}/{numGames} 局");
                 var sw = System.Diagnostics.Stopwatch.StartNew();
-                int moves = RunSingleGame(gameIdx, numSims, mctsThreads, dataDir, neural,
+                int moves = RunSingleGame(gameIdx, numSims, mctsThreads, dataDir, localNeural,
                     dirichletAlpha, dirichletEpsilon, temperature, tempThreshold, cpuct, maxMoves,
                     pauseFlag);
                 sw.Stop();
                 Console.WriteLine($"第 {gameIdx + 1}/{numGames} 局完成，用时 {sw.Elapsed.TotalSeconds:F1} 秒，步数 {moves}");
+
+                // 对局结束后立即释放该局的 Session 和 GPU 显存
+                localNeural?.Dispose();
 
                 int done = System.Threading.Interlocked.Increment(ref completed);
                 if (progressFile != null)
