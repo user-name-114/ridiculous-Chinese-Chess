@@ -34,6 +34,8 @@ double temperature = 1.0;
 int tempThreshold = 15;
 double cpuct = 1.2;
 int maxMoves = 400;
+int neuralBatchSize = 32;
+int neuralBatchTimeout = 2; // ms
 try
 {
     using var doc = JsonDocument.Parse(File.ReadAllText(configPath));
@@ -48,6 +50,10 @@ try
     dirichletAlpha = sp.GetProperty("dirichlet_alpha").GetDouble();
     dirichletEpsilon = sp.GetProperty("dirichlet_epsilon").GetDouble();
     maxMoves = sp.GetProperty("max_moves").GetInt32();
+    if (sp.TryGetProperty("neural_batch_size", out var bsEl))
+        neuralBatchSize = bsEl.GetInt32();
+    if (sp.TryGetProperty("neural_batch_timeout_ms", out var btEl))
+        neuralBatchTimeoutMs = btEl.GetInt32();
 }
 catch
 {
@@ -91,9 +97,10 @@ string onnxPath = args.Length > 4 ? args[4] : null;
 
 Console.WriteLine($"数据输出目录: {dataDir}");
 Console.WriteLine($"每步模拟次数: {numSims}");
-Console.WriteLine($"并行: {parallelGames} 局 × {mctsThreads} MCTS 线程");
+Console.WriteLine($"并行: {parallelGames} 局 × {mctsThreads} MCTS 线程" + (onnxPath != null ? $" | 批量推理(batch={neuralBatchSize})" : ""));
 Console.WriteLine($"温度: {temperature}（前 {tempThreshold} 步）| Dirichlet: α={dirichletAlpha} ε={dirichletEpsilon} | cpuct={cpuct} | 最大步数: {maxMoves}");
 
 SelfPlayTrainer.Run(numGames, numSims, mctsThreads, parallelGames, dataDir,
     progressFile, pauseFlag, onnxPath,
-    dirichletAlpha, dirichletEpsilon, temperature, tempThreshold, cpuct, maxMoves);
+    dirichletAlpha, dirichletEpsilon, temperature, tempThreshold, cpuct, maxMoves,
+    neuralBatchSize, neuralBatchTimeout);
