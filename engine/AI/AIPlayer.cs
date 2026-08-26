@@ -52,6 +52,13 @@ public class AIPlayer
         return engine.GetActionDistribution(state, rng);
     }
 
+    /// <summary>带真实对局历史的概率分布（让 MCTS 感知重复局面，避免推荐会导致判负的走法）</summary>
+    public List<(GameAction action, double probability)> GetActionDistribution(
+        Gamestate state, RepetitionTracker history)
+    {
+        return engine.GetActionDistribution(state, rng, history);
+    }
+
     public void ExecuteAction(Gamestate state, GameAction action)
     {
         engine.ExecuteAction(state, action, rng);

@@ -99,7 +99,7 @@ public static class MatchRunner
 
             if (ai != null)
             {
-                dist = ai.GetActionDistribution(state);
+                dist = ai.GetActionDistribution(state, repetitionTracker);
                 // 取概率最大的行动
                 double bestP = -1;
                 foreach (var (a, p) in dist)
@@ -139,10 +139,9 @@ public static class MatchRunner
             else
                 action.Execute(state, rng);
 
-            // 最近 30 步内同一局面出现第 3 次，判"刚走的一方"负
-            bool countRepetition = !(action is LotteryAction lottery
-                && lottery.lastOutcome >= 36);
-            if (repetitionTracker.AddState(state, countRepetition))
+            // 对局级重复检测：同一局面出现第 3 次，判"刚走的一方"负（抽奖豁免）
+            bool isLottery = action is LotteryAction;
+            if (repetitionTracker.AddState(state, isLottery))
             {
                 // 默认判"刚走的一方"负；若指定 repetitionLoser（评测时固定为 onnx），则固定判该方负
                 int loser = repetitionLoser != 0 ? repetitionLoser : team;

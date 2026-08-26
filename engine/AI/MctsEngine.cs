@@ -19,42 +19,88 @@ using System.Threading.Tasks;
 // ====================================================================
 public sealed class RepetitionTracker
 {
-    public const int WindowSize = 30;
-    private readonly Dictionary<long, int> counts = new Dictionary<long, int>();
-    private readonly Queue<(int ply, long key, bool counted)> recent =
-        new Queue<(int ply, long key, bool counted)>();
+    public const int WindowSize = 20;
+    private Dictionary<long, int> counts = new Dictionary<long, int>();
+    private Queue<long> recent = new Queue<long>();
     private int ply;
+
+    public RepetitionTracker()
+    {
+    }
 
     public RepetitionTracker(Gamestate state)
     {
-        long key = MctsEngine.RepetitionKey(state);
-        counts[key] = 1;
-        recent.Enqueue((0, key, true));
+        AddState(state);
     }
 
-    public bool AddState(Gamestate state, bool countForRepetition)
+    /// <summary>创建一份快照（深拷贝 counts 和 recent），供 MCTS 模拟继承真实对局历史</summary>
+    public RepetitionTracker Clone()
+    {
+        var clone = new RepetitionTracker();
+        clone.ply = ply;
+        foreach (var kv in counts)
+            clone.counts[kv.Key] = kv.Value;
+        foreach (var item in recent)
+            clone.recent.Enqueue(item);
+        return clone;
+    }
+
+    /// <summary>添加一个状态，返回该状态在窗口内是否已出现 3 次（第 3 次时返回 true）。
+    /// isLottery=true 时不计入重复检测（抽奖不可控，不应因运气不好判负）</summary>
+    public bool AddState(Gamestate state, bool isLottery = false)
+    {
+        long key = MctsEngine.RepetitionKey(state);
+        if (!isLottery)
+            AddKey(key);
+        else
+            // 抽奖仍滑动窗口（移除过期条目），但不增加计数
+            AddKeyLottery(key);
+        return !isLottery && counts.TryGetValue(key, out int c) && c >= 3;
+    }
+
+    /// <summary>检查如果添加这个状态，是否会构成第 3 次重复（不实际添加）</summary>
+    public bool WouldRepeat(Gamestate state)
+    {
+        long key = MctsEngine.RepetitionKey(state);
+        return counts.TryGetValue(key, out int c) && c >= 2;
+    }
+
+    private void AddKey(long key)
     {
         ply++;
-        long key = MctsEngine.RepetitionKey(state);
-        recent.Enqueue((ply, key, countForRepetition));
+        recent.Enqueue(key);
+        counts.TryGetValue(key, out int c);
+        counts[key] = c + 1;
 
-        if (countForRepetition)
+        while (recent.Count > WindowSize)
         {
-            counts.TryGetValue(key, out int count);
-            count++;
-            counts[key] = count;
+            var oldKey = recent.Dequeue();
+            counts[oldKey]--;
+            if (counts[oldKey] == 0)
+                counts.Remove(oldKey);
         }
+    }
 
-        while (recent.Count > 0 && recent.Peek().ply < ply - WindowSize)
+    /// <summary>抽奖走法：滑动窗口但只标记"占位"，不增加重复计数</summary>
+    private void AddKeyLottery(long key)
+    {
+        // 用负数标记抽奖占位，和正常计数的正数区分
+        long placeholder = ~key; // 按位取反作为占位键
+        ply++;
+        recent.Enqueue(placeholder);
+        // 不增加 counts[key]
+
+        while (recent.Count > WindowSize)
         {
-            var old = recent.Dequeue();
-            if (!old.counted) continue;
-            counts[old.key]--;
-            if (counts[old.key] == 0)
-                counts.Remove(old.key);
+            var oldKey = recent.Dequeue();
+            // 正常计数的 key 才需要递减
+            if (oldKey >= 0 && counts.ContainsKey(oldKey))
+            {
+                counts[oldKey]--;
+                if (counts[oldKey] == 0)
+                    counts.Remove(oldKey);
+            }
         }
-
-        return countForRepetition && counts[key] >= 3;
     }
 }
 
@@ -109,6 +155,27 @@ public class MctsEngine
         MctsNode root = RunMcts(state, rng);
         var dist = new List<(GameAction action, double probability)>();
         double total = root.visitCount;
+        foreach (MctsNode child in root.children)
+            dist.Add((child.action, child.visitCount / total));
+        return dist;
+    }
+
+    /// <summary>运行 MCTS（带真实对局历史），返回概率分布</summary>
+    public List<(GameAction action, double probability)> GetActionDistribution(
+        Gamestate state, System.Random rng, RepetitionTracker history)
+    {
+        MctsNode root;
+        if (threadCount <= 1)
+            root = RunMctsSingle(state, rng, null, history);
+        else
+            root = RunMcts(state, rng); // 根并行化模式不支持历史传入
+        var dist = new List<(GameAction action, double probability)>();
+        double total = root.visitCount;
+        if (total == 0)
+        {
+            // 所有模拟都被剪枝，回退到无历史搜索
+            return GetActionDistribution(state, rng);
+        }
         foreach (MctsNode child in root.children)
             dist.Add((child.action, child.visitCount / total));
         return dist;
@@ -186,30 +253,46 @@ public class MctsEngine
     /// <summary>单线程 MCTS（可指定模拟次数，供并行版调用）</summary>
     private MctsNode RunMctsSingle(Gamestate state, System.Random rng, int? simsOverride = null)
     {
+        return RunMctsSingle(state, rng, simsOverride, null);
+    }
+
+    /// <summary>单线程 MCTS，可传入真实对局历史用于重复检测</summary>
+    private MctsNode RunMctsSingle(Gamestate state, System.Random rng, int? simsOverride,
+        RepetitionTracker realHistory)
+    {
         int sims = simsOverride ?? maxSimulations;
         MctsNode root = new MctsNode(null, null);
 
-        for (int i = 0; i < sims; i++)
+        int validSims = 0;
+        int attempts = 0;
+        int maxAttempts = sims * 3; // 安全阀：防止极端情况下无限循环
+        while (validSims < sims && attempts < maxAttempts)
         {
+            attempts++;
             Gamestate workState;
             try { workState = state.DeepClone(); }
             catch (Exception ex)
-            { throw new Exception($"DeepClone failed at sim {i}: {ex.Message}", ex); }
+            { throw new Exception($"DeepClone failed at sim {validSims}: {ex.Message}", ex); }
+
+            // 每次模拟克隆一份真实历史，从根节点重新遍历
+            RepetitionTracker simTracker = realHistory?.Clone() ?? new RepetitionTracker();
 
             MctsNode leaf;
-            bool repetitionLoss;
-            var repetitionTracker = new RepetitionTracker(workState);
-            try { leaf = Select(root, workState, rng, repetitionTracker, out repetitionLoss); }
+            try { leaf = Select(root, workState, rng, simTracker); }
             catch (Exception ex)
-            { throw new Exception($"Select failed at sim {i}: {ex.Message}", ex); }
+            { throw new Exception($"Select failed at sim {validSims}: {ex.Message}", ex); }
+
+            // leaf == null 表示该模拟因所有走法被剪枝而无法继续，不计入有效次数
+            if (leaf == null)
+                continue;
+
+            validSims++;
 
             double result;
             float[] priors = null;
             try
             {
-                if (repetitionLoss)
-                    result = 1;
-                else if (IsTerminal(workState))
+                if (IsTerminal(workState))
                     result = Evaluate(workState);
                 else if (neural != null)
                 {
@@ -224,7 +307,7 @@ public class MctsEngine
                     result = Simulate(workState, rng);
             }
             catch (Exception ex)
-            { throw new Exception($"Simulate failed at sim {i}: {ex.Message}", ex); }
+            { throw new Exception($"Simulate failed at sim {validSims}: {ex.Message}", ex); }
 
             // 展开叶节点（策略网络先验或均匀先验）；ChanceNode 不在此展开（由 HandleChanceNode 管理）
             if (!IsTerminal(workState) && leaf.children.Count == 0 && !leaf.IsChanceNode)
@@ -244,25 +327,22 @@ public class MctsEngine
     // ================================================================
     //  Select — 沿树向下遍历直到叶节点
     //
-    //  普通节点: Expand 尝试添加子节点 → UCB 选择 → Execute 推进状态
-    //  ChanceNode（抽奖）: HandleChanceNode 随机采样 outcome，
-    //  创建 outcome 子节点（PW 限制），不提前返回，继续循环深入。
-    //  这样可以探索"抽奖后下一步该怎么走"，而非直接 rollout。
+    //  重复检测采用剪枝而非惩罚：
+    //    执行一个非抽奖动作后，检查新局面是否构成第 3 次重复。
+    //    如果是，标记该子节点为 pruned（PUCT 不再选择），回退 state，
+    //    重新选择其他子节点。所有子节点都被剪枝时返回 null（跳过本次模拟）。
+    //    抽奖动作（含未中奖和无效抽奖）豁免剪枝——抽不出好结果无可厚非。
     // ================================================================
 
     private MctsNode Select(MctsNode node, Gamestate state, System.Random rng,
-        RepetitionTracker repetitionTracker, out bool repetitionLoss)
+        RepetitionTracker repetitionTracker)
     {
-        repetitionLoss = false;
         while (!IsTerminal(state))
         {
             // ── ChanceNode: 随机采样 outcome，创建子节点，继续深入 ──
             if (node.IsChanceNode)
             {
-                MctsNode result = HandleChanceNode(node, state, rng, repetitionTracker,
-                    out repetitionLoss);
-                if (repetitionLoss)
-                    return result;
+                MctsNode result = HandleChanceNode(node, state, rng, repetitionTracker);
                 if (result == node)
                     return node;          // PW 限制达到，叶节点
                 node = result;            // outcome 子节点，继续循环
@@ -273,25 +353,46 @@ public class MctsEngine
             if (node.children.Count == 0)
                 return node;
 
-            // ── PUCT 选择最优子节点 ──
-            node = BestPuctChild(node);
+            // ── PUCT 选择最优子节点（跳过 pruned）──
+            MctsNode child = BestPuctChild(node);
 
-            // ChanceNode 不在此 Execute — HandleChanceNode 会处理，避免双重执行
-            if (node.IsChanceNode)
-                continue;
+            // 所有子节点都被剪枝或无合法子节点
+            if (child == null)
+                return null;
 
-            // 普通节点：校验合法性
-            if (!IsActionValid(node.action, state))
-                return node;
-
-            ExecuteAction(state, node.action, rng);
-            bool countRepetition = !(node.action is LotteryAction lottery
-                && lottery.lastOutcome >= 36);
-            if (repetitionTracker.AddState(state, countRepetition))
+            // ── 抽奖子节点：交给 HandleChanceNode 处理，不在此执行 ──
+            if (child.IsChanceNode)
             {
-                repetitionLoss = true;
-                return node;
+                node = child;
+                continue;
             }
+
+            // ── 普通节点：校验合法性 ──
+            if (!IsActionValid(child.action, state))
+            {
+                child.pruned = true;
+                continue;
+            }
+
+            // ── 执行动作，检查重复 ──
+            // 先在 workState 的快照上试走，检查是否重复
+            Gamestate testState = state.DeepClone();
+            ExecuteAction(testState, child.action, rng);
+
+            // 抽奖动作豁免重复检测
+            bool isLottery = child.action is LotteryAction;
+            if (!isLottery && repetitionTracker.WouldRepeat(testState))
+            {
+                // 标记此走法为非法，重新选择
+                child.pruned = true;
+                continue;
+            }
+
+            // 确认执行：推进真实 state 和 tracker
+            ExecuteAction(state, child.action, rng);
+            repetitionTracker.AddState(state);
+
+            node = child;
         }
 
         return node; // 终局
@@ -307,9 +408,8 @@ public class MctsEngine
     // ================================================================
 
     private MctsNode HandleChanceNode(MctsNode node, Gamestate state, System.Random rng,
-        RepetitionTracker repetitionTracker, out bool repetitionLoss)
+        RepetitionTracker repetitionTracker)
     {
-        repetitionLoss = false;
         int outcome = rng.Next(1, 41);
         node.sampledOutcome = outcome;
         ((LotteryAction)node.action).lastOutcome = outcome;
@@ -317,11 +417,8 @@ public class MctsEngine
         ExecuteLotteryOutcome(state, outcome, rng);
         GameAction.EndTurn(state);
 
-        if (repetitionTracker.AddState(state, outcome < 36))
-        {
-            repetitionLoss = true;
-            return node;
-        }
+        // 抽奖豁免重复检测——不剪枝、不判负
+        repetitionTracker.AddState(state, isLottery: true);
 
         // 查找已有 outcome 子节点
         if (node.outcomeChildren == null)
@@ -788,6 +885,8 @@ public class MctsEngine
 
         foreach (MctsNode child in node.children)
         {
+            if (child.pruned) continue;
+
             double c = (child.action is LotteryAction)
                 ? explorationConstant * lotteryCMultiplier
                 : explorationConstant;

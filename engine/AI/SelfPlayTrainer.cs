@@ -149,8 +149,8 @@ public static class SelfPlayTrainer
             boards.Add(StateEncoder.Encode(state));
             graves.Add(StateEncoder.EncodeGraveyard(state));
 
-            // 获取 MCTS 动作分布
-            var dist = ai.GetActionDistribution(state);
+            // 获取 MCTS 动作分布（传入真实对局历史，让 MCTS 感知重复局面）
+            var dist = ai.GetActionDistribution(state, repetitionTracker);
 
             // 稀疏化：只保留概率 > 0 的动作，编码成索引
             var indices = new List<int>();
@@ -171,12 +171,11 @@ public static class SelfPlayTrainer
             if (best == null) break;
             ai.ExecuteAction(state, best);
 
-            // 最近 30 步内同一局面出现第 3 次，判"刚走的一方"负
-            bool countRepetition = !(best is LotteryAction lottery
-                && lottery.lastOutcome >= 36);
-            if (repetitionTracker.AddState(state, countRepetition))
+            // 对局级重复检测：同一局面出现第 3 次，判"刚走的一方"负（抽奖豁免）
+            bool isLottery = best is LotteryAction;
+            if (repetitionTracker.AddState(state, isLottery))
             {
-                winner = state.currentTeam; // 刚走的一方（-currentTeam）重复走子，判负，对手胜
+                winner = state.currentTeam; // 刚走的一方判负，对手胜
                 break;
             }
         }
