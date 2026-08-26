@@ -19,16 +19,16 @@
     "num_mcts_sims": 200,
     "cpuct": 1.2,
     "temperature": 1.0,
-    "temp_threshold": 15
+    "temp_threshold": 20
   },
   "selfplay": {
     "num_games": 500,
     "dirichlet_alpha": 0.3,
     "dirichlet_epsilon": 0.25,
     "max_moves": 300,
-    "parallel_games": 32,
-    "mcts_threads": 1,
+    "parallel_games": 24,
+    "mcts_threads": 2,
     "neural_batch_size": 32,
-    "neural_batch_timeout_ms": 2
+    "neural_batch_timeout_ms": 5
   }
 }
