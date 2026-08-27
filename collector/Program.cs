@@ -35,7 +35,7 @@ int tempThreshold = 15;
 double cpuct = 1.2;
 int maxMoves = 400;
 int neuralBatchSize = 32;
-int neuralBatchTimeout = 2; // ms
+int neuralBatchTimeoutMs = 2; // ms
 try
 {
     using var doc = JsonDocument.Parse(File.ReadAllText(configPath));
@@ -103,4 +103,4 @@ Console.WriteLine($"温度: {temperature}（前 {tempThreshold} 步）| Dirichle
 SelfPlayTrainer.Run(numGames, numSims, mctsThreads, parallelGames, dataDir,
     progressFile, pauseFlag, onnxPath,
     dirichletAlpha, dirichletEpsilon, temperature, tempThreshold, cpuct, maxMoves,
-    neuralBatchSize, neuralBatchTimeout);
+    neuralBatchSize, neuralBatchTimeoutMs);
