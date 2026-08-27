@@ -25,7 +25,7 @@
     "num_games": 500,
     "dirichlet_alpha": 0.3,
     "dirichlet_epsilon": 0.25,
-    "max_moves": 300,
+    "max_moves": 250,
     "parallel_games": 24,
     "mcts_threads": 2,
     "neural_batch_size": 32,
