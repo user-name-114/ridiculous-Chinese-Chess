@@ -175,6 +175,10 @@ public static class SelfPlayTrainer
             bool isLottery = best is LotteryAction;
             if (repetitionTracker.AddState(state, isLottery))
             {
+                Console.WriteLine($"[Game {gameIdx}] 重复判负！步数={move} 走法={best.GetDescription()} isLottery={isLottery}");
+                // 打印 MCTS 输出的分布，看是否包含会导致重复的走法
+                foreach (var (a, p) in dist)
+                    Console.WriteLine($"  动作={a.GetDescription()} 概率={p:F4}");
                 winner = state.currentTeam; // 刚走的一方判负，对手胜
                 break;
             }

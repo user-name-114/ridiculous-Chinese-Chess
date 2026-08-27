@@ -21,7 +21,7 @@ public sealed class RepetitionTracker
 {
     public const int WindowSize = 20;
     private Dictionary<long, int> counts = new Dictionary<long, int>();
-    private Queue<long> recent = new Queue<long>();
+    private Queue<(long key, bool isReal)> recent = new Queue<(long key, bool isReal)>();
     private int ply;
 
     public RepetitionTracker()
@@ -68,38 +68,34 @@ public sealed class RepetitionTracker
     private void AddKey(long key)
     {
         ply++;
-        recent.Enqueue(key);
+        recent.Enqueue((key, true));
         counts.TryGetValue(key, out int c);
         counts[key] = c + 1;
 
         while (recent.Count > WindowSize)
         {
-            var oldKey = recent.Dequeue();
+            var (oldKey, isReal) = recent.Dequeue();
+            if (!isReal) continue;
             counts[oldKey]--;
             if (counts[oldKey] == 0)
                 counts.Remove(oldKey);
         }
     }
 
-    /// <summary>抽奖走法：滑动窗口但只标记"占位"，不增加重复计数</summary>
+    /// <summary>抽奖走法：滑动窗口但不增加重复计数</summary>
     private void AddKeyLottery(long key)
     {
-        // 用负数标记抽奖占位，和正常计数的正数区分
-        long placeholder = ~key; // 按位取反作为占位键
         ply++;
-        recent.Enqueue(placeholder);
-        // 不增加 counts[key]
+        recent.Enqueue((key, false));
+        // 不增加 counts
 
         while (recent.Count > WindowSize)
         {
-            var oldKey = recent.Dequeue();
-            // 正常计数的 key 才需要递减
-            if (oldKey >= 0 && counts.ContainsKey(oldKey))
-            {
-                counts[oldKey]--;
-                if (counts[oldKey] == 0)
-                    counts.Remove(oldKey);
-            }
+            var (oldKey, isReal) = recent.Dequeue();
+            if (!isReal) continue;
+            counts[oldKey]--;
+            if (counts[oldKey] == 0)
+                counts.Remove(oldKey);
         }
     }
 }
@@ -148,36 +144,50 @@ public class MctsEngine
         return BestChild(root);
     }
 
+    /// <summary>运行 MCTS（带真实对局历史），返回最优行动</summary>
+    public GameAction FindBestAction(Gamestate state, System.Random rng, RepetitionTracker history)
+    {
+        MctsNode root = RunMcts(state, rng, history);
+        return BestChild(root);
+    }
+
     /// <summary>运行 MCTS，返回根节点各行动的概率分布（visitCount 归一化）</summary>
     public List<(GameAction action, double probability)> GetActionDistribution(
         Gamestate state, System.Random rng)
     {
-        MctsNode root = RunMcts(state, rng);
-        var dist = new List<(GameAction action, double probability)>();
-        double total = root.visitCount;
-        foreach (MctsNode child in root.children)
-            dist.Add((child.action, child.visitCount / total));
-        return dist;
+        MctsNode root = RunMcts(state, rng, null);
+        return BuildDistribution(root);
     }
 
     /// <summary>运行 MCTS（带真实对局历史），返回概率分布</summary>
     public List<(GameAction action, double probability)> GetActionDistribution(
         Gamestate state, System.Random rng, RepetitionTracker history)
     {
-        MctsNode root;
-        if (threadCount <= 1)
-            root = RunMctsSingle(state, rng, null, history);
-        else
-            root = RunMcts(state, rng); // 根并行化模式不支持历史传入
-        var dist = new List<(GameAction action, double probability)>();
-        double total = root.visitCount;
-        if (total == 0)
+        MctsNode root = RunMcts(state, rng, history);
+        if (root.visitCount == 0)
         {
             // 所有模拟都被剪枝，回退到无历史搜索
             return GetActionDistribution(state, rng);
         }
+        return BuildDistribution(root);
+    }
+
+    /// <summary>从根节点构建概率分布，过滤掉 pruned 子节点</summary>
+    private List<(GameAction action, double probability)> BuildDistribution(MctsNode root)
+    {
+        var dist = new List<(GameAction action, double probability)>();
+        double total = 0;
         foreach (MctsNode child in root.children)
+        {
+            if (child.pruned) continue;
+            total += child.visitCount;
+        }
+        if (total == 0) return dist;
+        foreach (MctsNode child in root.children)
+        {
+            if (child.pruned) continue;
             dist.Add((child.action, child.visitCount / total));
+        }
         return dist;
     }
 
@@ -205,8 +215,14 @@ public class MctsEngine
     /// </summary>
     private MctsNode RunMcts(Gamestate state, System.Random rng)
     {
+        return RunMcts(state, rng, null);
+    }
+
+    /// <summary>根并行化 MCTS，支持传入真实对局历史（每个线程 Clone 一份）</summary>
+    private MctsNode RunMcts(Gamestate state, System.Random rng, RepetitionTracker history)
+    {
         if (threadCount <= 1)
-            return RunMctsSingle(state, rng);
+            return RunMctsSingle(state, rng, null, history);
 
         // ── 根并行化 ──
         int threads = Math.Min(threadCount, maxSimulations);
@@ -218,7 +234,7 @@ public class MctsEngine
         {
             int sims = simsPerThread + (t < remainder ? 1 : 0);
             var localRng = new System.Random(rng.Next());
-            partialRoots[t] = RunMctsSingle(state, localRng, sims);
+            partialRoots[t] = RunMctsSingle(state, localRng, sims, history);
         });
 
         // ── 合并根节点的子节点 ──
@@ -276,11 +292,16 @@ public class MctsEngine
 
             // 每次模拟克隆一份真实历史，从根节点重新遍历
             RepetitionTracker simTracker = realHistory?.Clone() ?? new RepetitionTracker();
+            var prunedThisSelect = new List<MctsNode>();
 
             MctsNode leaf;
-            try { leaf = Select(root, workState, rng, simTracker); }
+            try { leaf = Select(root, workState, rng, simTracker, prunedThisSelect); }
             catch (Exception ex)
             { throw new Exception($"Select failed at sim {validSims}: {ex.Message}", ex); }
+
+            // 清除本次 Select 的临时剪枝标记（重复剪枝只在单次模拟内有效）
+            foreach (var n in prunedThisSelect)
+                n.pruned = false;
 
             // leaf == null 表示该模拟因所有走法被剪枝而无法继续，不计入有效次数
             if (leaf == null)
@@ -335,7 +356,7 @@ public class MctsEngine
     // ================================================================
 
     private MctsNode Select(MctsNode node, Gamestate state, System.Random rng,
-        RepetitionTracker repetitionTracker)
+        RepetitionTracker repetitionTracker, List<MctsNode> prunedThisSelect)
     {
         while (!IsTerminal(state))
         {
@@ -353,39 +374,40 @@ public class MctsEngine
             if (node.children.Count == 0)
                 return node;
 
-            // ── PUCT 选择最优子节点（跳过 pruned）──
-            MctsNode child = BestPuctChild(node);
-
-            // 所有子节点都被剪枝或无合法子节点
-            if (child == null)
-                return null;
-
-            // ── 抽奖子节点：交给 HandleChanceNode 处理，不在此执行 ──
-            if (child.IsChanceNode)
+            // ── PUCT 选择最优子节点 ──
+            // 重复检测：实时检查 WouldRepeat，不永久标记 pruned。
+            // 同一节点在不同模拟路径中重复条件不同，永久标记会导致错误剪枝。
+            MctsNode child = null;
+            while (true)
             {
-                node = child;
-                continue;
-            }
+                child = BestPuctChild(node);
+                if (child == null)
+                    return null; // 所有走法都不可用
 
-            // ── 普通节点：校验合法性 ──
-            if (!IsActionValid(child.action, state))
-            {
-                child.pruned = true;
-                continue;
-            }
+                // 抽奖子节点不检查重复，直接使用
+                if (child.IsChanceNode)
+                    break;
 
-            // ── 执行动作，检查重复 ──
-            // 先在 workState 的快照上试走，检查是否重复
-            Gamestate testState = state.DeepClone();
-            ExecuteAction(testState, child.action, rng);
+                // 普通节点：校验合法性
+                if (!IsActionValid(child.action, state))
+                {
+                    child.pruned = true; // 合法性失败是永久的（棋子已移动/冻结等）
+                    continue;
+                }
 
-            // 抽奖动作豁免重复检测
-            bool isLottery = child.action is LotteryAction;
-            if (!isLottery && repetitionTracker.WouldRepeat(testState))
-            {
-                // 标记此走法为非法，重新选择
-                child.pruned = true;
-                continue;
+                // 检查重复：试走，看是否构成第 3 次重复
+                Gamestate testState = state.DeepClone();
+                ExecuteAction(testState, child.action, rng);
+                if (repetitionTracker.WouldRepeat(testState))
+                {
+                    // 本次模拟中此走法会导致重复，跳过（不永久标记）
+                    // 用临时标记让 BestPuctChild 跳过，本次模拟结束后清除
+                    child.pruned = true;
+                    prunedThisSelect.Add(child);
+                    continue;
+                }
+
+                break; // 找到合法且不重复的子节点
             }
 
             // 确认执行：推进真实 state 和 tracker
@@ -427,16 +449,10 @@ public class MctsEngine
         if (node.outcomeChildren.TryGetValue(outcome, out MctsNode oc))
             return oc; // 已有子节点 → 继续深入
 
-        // Progressive Widening
-        int maxOC = (int)Math.Sqrt(node.visitCount + 1) + 3;
-        if (node.outcomeChildren.Count < maxOC)
-        {
-            oc = new MctsNode(null, node); // outcome 子节点无 action
-            node.outcomeChildren[outcome] = oc;
-            return oc;
-        }
-
-        return node; // PW 限制达到
+        // 抽奖 outcome 均匀随机，不做 Progressive Widening，广度优先展开所有 40 个 outcome
+        oc = new MctsNode(null, node); // outcome 子节点无 action
+        node.outcomeChildren[outcome] = oc;
+        return oc;
     }
 
     private void ExecuteLottery(Gamestate state, System.Random rng)
@@ -722,6 +738,9 @@ public class MctsEngine
     {
         if (action is MoveAction m)
         {
+            // 边界检查：action 坐标可能在搜索树持久化期间因领域展开/收缩而失效
+            if (!state.IsValidPosition(m.fromX, m.fromY) || !state.IsValidPosition(m.toX, m.toY))
+                return false;
             Piece piece = state[m.fromX, m.fromY];
             if (piece.type == PieceType.Empty || piece.thisTeam != action.team)
                 return false;
@@ -730,6 +749,8 @@ public class MctsEngine
         }
         if (action is SniperAction s)
         {
+            if (!state.IsValidPosition(s.fromX, s.fromY))
+                return false;
             Piece piece = state[s.fromX, s.fromY];
             if (!(piece is Pawn pawn) || pawn.thisTeam != action.team)
                 return false;
@@ -908,6 +929,7 @@ public class MctsEngine
 
         foreach (MctsNode child in root.children)
         {
+            if (child.pruned) continue;
             if (child.visitCount > bestVisits)
             {
                 bestVisits = child.visitCount;

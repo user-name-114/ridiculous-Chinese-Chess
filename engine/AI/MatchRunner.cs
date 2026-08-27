@@ -143,6 +143,11 @@ public static class MatchRunner
             bool isLottery = action is LotteryAction;
             if (repetitionTracker.AddState(state, isLottery))
             {
+                Console.WriteLine($"[重复判负] 步数={moveCount + 1} 走法={action.GetDescription()} isLottery={isLottery} 走方={team}");
+                if (dist != null)
+                    foreach (var (a, p) in dist)
+                        Console.WriteLine($"  动作={a.GetDescription()} 概率={p:F4}");
+
                 // 默认判"刚走的一方"负；若指定 repetitionLoser（评测时固定为 onnx），则固定判该方负
                 int loser = repetitionLoser != 0 ? repetitionLoser : team;
                 return new MatchResult

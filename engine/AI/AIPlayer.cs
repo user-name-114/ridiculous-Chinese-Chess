@@ -46,6 +46,12 @@ public class AIPlayer
         return engine.FindBestAction(state, rng);
     }
 
+    /// <summary>带真实对局历史，返回最优行动（让 MCTS 感知重复局面）</summary>
+    public GameAction GetBestAction(Gamestate state, RepetitionTracker history)
+    {
+        return engine.FindBestAction(state, rng, history);
+    }
+
     /// <summary>返回根节点各行动的概率分布（visitCount 归一化），用于自对弈数据收集</summary>
     public List<(GameAction action, double probability)> GetActionDistribution(Gamestate state)
     {
