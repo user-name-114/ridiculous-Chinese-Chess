@@ -11,24 +11,29 @@
     "learning_rate": 0.001,
     "batch_size": 128,
     "weight_decay": 0.0001,
-    "num_train_steps": 1200,
+    "num_train_steps": 1000,
     "checkpoint_interval": 200,
-    "value_loss_weight": 1.0
+    "value_loss_weight": 1.0,
+    "use_amp": true
   },
   "mcts": {
     "num_mcts_sims": 200,
     "cpuct": 1.2,
     "temperature": 1.0,
-    "temp_threshold": 20
+    "temp_threshold": 20,
+    "virtual_loss": 0.5,
+    "lottery_eval_limit": 16,
+    "eval_material_weight": 0.15
   },
   "selfplay": {
     "num_games": 500,
     "dirichlet_alpha": 0.3,
     "dirichlet_epsilon": 0.25,
-    "max_moves": 250,
+    "max_moves": 200,
     "parallel_games": 24,
-    "mcts_threads": 2,
+    "mcts_threads": 4,
     "neural_batch_size": 32,
-    "neural_batch_timeout_ms": 5
+    "neural_batch_timeout_ms": 5,
+    "match_parallel_games": 16
   }
 }

@@ -59,7 +59,11 @@ def load_config(path="config.json"):
 
 
 def load_data(data_dir):
-    """加载 .bin 数据。返回 boards, graveyards, policies, values。"""
+    """加载 .bin 数据。返回 boards, graveyards, policies, values。
+
+    用 np.frombuffer 偏移量游走解析，避免对每个样本调上千次 struct.unpack
+    （每个棋盘 13552 字节逐 float 解包非常慢，是续训加载的主要瓶颈）。
+    """
     bin_files = sorted(glob.glob(os.path.join(data_dir, "*.bin")))
     if not bin_files:
         print(f"[错误] {data_dir} 下没有 .bin 数据文件")
@@ -68,39 +72,78 @@ def load_data(data_dir):
     all_boards, all_graves, all_policies, all_values = [], [], [], []
     for fp in bin_files:
         with open(fp, "rb") as f:
-            num_samples = struct.unpack("i", f.read(4))[0]
-            board_size = struct.unpack("i", f.read(4))[0]
-            grave_size = struct.unpack("i", f.read(4))[0]
-            for _ in range(num_samples):
-                board = struct.unpack(f"{board_size}f", f.read(board_size * 4))
-                grave = struct.unpack(f"{grave_size}f", f.read(grave_size * 4))
-                na = struct.unpack("i", f.read(4))[0]
-                indices = struct.unpack(f"{na}i", f.read(na * 4))
-                probs = struct.unpack(f"{na}f", f.read(na * 4))
-                value = struct.unpack("f", f.read(4))[0]
-                all_boards.append(board)
-                all_graves.append(grave)
-                all_policies.append((np.array(indices, dtype=np.int64),
-                                     np.array(probs, dtype=np.float32)))
-                all_values.append(value)
+            raw = f.read()
+        num_samples, board_size, grave_size = struct.unpack_from("iii", raw, 0)
+        assert (board_size, grave_size) == (3388, 18), (fp, board_size, grave_size)
 
-    boards = np.array(all_boards, dtype=np.float32)
+        boards = np.empty((num_samples, board_size), dtype=np.float32)
+        graves = np.empty((num_samples, grave_size), dtype=np.float32)
+        values = np.empty(num_samples, dtype=np.float32)
+        pol_pairs = [None] * num_samples
+
+        off = 12
+        b_bytes = board_size * 4
+        g_bytes = grave_size * 4
+        f32 = np.float32
+        i32 = np.int32
+        for i in range(num_samples):
+            boards[i] = np.frombuffer(raw, f32, board_size, off)
+            off += b_bytes
+            graves[i] = np.frombuffer(raw, f32, grave_size, off)
+            off += g_bytes
+            na = struct.unpack_from("i", raw, off)[0]
+            off += 4
+            idx = np.frombuffer(raw, i32, na, off)
+            off += na * 4
+            prob = np.frombuffer(raw, f32, na, off)
+            off += na * 4
+            values[i] = np.frombuffer(raw, f32, 1, off)[0]
+            off += 4
+            pol_pairs[i] = (idx.astype(np.int64, copy=False), prob.copy())
+
+        all_boards.append(boards)
+        all_graves.append(graves)
+        all_values.append(values)
+        all_policies.extend(pol_pairs)
+
+    boards = np.concatenate(all_boards, axis=0)
     boards = boards.reshape(-1, INPUT_CH, BOARD_H, BOARD_W)  # (N, 22, 14, 11)
-    graveyards = np.array(all_graves, dtype=np.float32)
-    values = np.array(all_values, dtype=np.float32)
+    graveyards = np.concatenate(all_graves, axis=0)
+    values = np.concatenate(all_values, axis=0)
     print(f"加载 {len(boards)} 个样本（来自 {len(bin_files)} 个文件）")
     return boards, graveyards, all_policies, values
 
 
 def sparse_cross_entropy(logits, indices_list, probs_list):
-    """稀疏策略交叉熵。logits (B, 24333)，indices/probs 是每样本的稀疏目标。"""
+    """稀疏策略交叉熵（向量化版）。
+
+    把整个 batch 的稀疏索引拼接后一次性从 log_softmax 里取值，
+    不再逐样本 Python 循环（batch 大时循环是纯 GPU 空转）。
+    """
+    B = logits.size(0)
     log_probs = F.log_softmax(logits, dim=1)
-    losses = []
-    for i in range(logits.size(0)):
-        idx = indices_list[i]
-        prob = probs_list[i]
-        losses.append(-torch.sum(prob * log_probs[i][idx]))
-    return torch.stack(losses).mean()
+
+    parts_idx = []
+    parts_prob = []
+    counts = []
+    for idx, prob in zip(indices_list, probs_list):
+        if idx.numel() == 0:
+            continue
+        parts_idx.append(idx)
+        parts_prob.append(prob)
+        counts.append(idx.numel())
+
+    if not parts_idx:
+        return logits.sum() * 0.0  # 空目标：保持图连通的零损失
+
+    idx_flat = torch.cat(parts_idx, dim=0)
+    prob_flat = torch.cat(parts_prob, dim=0)
+    counts_t = torch.as_tensor(counts, dtype=torch.long, device=logits.device)
+    rows = torch.repeat_interleave(
+        torch.arange(B, device=logits.device), counts_t)
+
+    selected = log_probs[rows, idx_flat]
+    return -(prob_flat * selected).sum() / B
 
 
 def save_checkpoint(path, model, optimizer, step, config, elo=None):
@@ -168,6 +211,11 @@ def train(config, data, checkpoint_dir, resume_from=None, net_name="latest"):
     num_steps = tr_cfg["num_train_steps"]
     interval = tr_cfg["checkpoint_interval"]
     value_weight = tr_cfg["value_loss_weight"]
+    use_amp = bool(tr_cfg.get("use_amp", False)) and device.type == "cuda"
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+    if device.type == "cuda":
+        props = torch.cuda.get_device_properties(0)
+        print(f"GPU: {props.name} ({props.total_memory / 1024**3:.1f} GB) | AMP={use_amp}")
     n = boards_t.size(0)
 
     os.makedirs(checkpoint_dir, exist_ok=True)
@@ -192,16 +240,25 @@ def train(config, data, checkpoint_dir, resume_from=None, net_name="latest"):
         b_idx = [pol_idx[i] for i in indices]
         b_prob = [pol_prob[i] for i in indices]
 
-        policy_logits, v_pred = model(x, g)
-        v_pred = v_pred.squeeze(1)
-
-        policy_loss = sparse_cross_entropy(policy_logits, b_idx, b_prob)
-        value_loss = F.mse_loss(v_pred, v_target)
-        loss = policy_loss + value_weight * value_loss
+        if use_amp:
+            with torch.autocast(device_type="cuda", dtype=torch.float16):
+                policy_logits, v_pred = model(x, g)
+                v_pred = v_pred.squeeze(1)
+                # BN/log_softmax 在 autocast 下自动跑 fp32，不担心精度问题
+                policy_loss = sparse_cross_entropy(policy_logits, b_idx, b_prob)
+                value_loss = F.mse_loss(v_pred.float(), v_target)
+                loss = policy_loss + value_weight * value_loss
+        else:
+            policy_logits, v_pred = model(x, g)
+            v_pred = v_pred.squeeze(1)
+            policy_loss = sparse_cross_entropy(policy_logits, b_idx, b_prob)
+            value_loss = F.mse_loss(v_pred, v_target)
+            loss = policy_loss + value_weight * value_loss
 
         optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
 
         if step % 50 == 0:
             print(f"step {step}/{num_steps}  loss={loss.item():.4f}  "

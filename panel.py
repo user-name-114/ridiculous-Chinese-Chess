@@ -36,20 +36,44 @@ PARAM_INFO = {
     "training.num_train_steps": ("训练步数", "每一代训练多少步，步数越多学得越充分（也更慢）", False),
     "training.checkpoint_interval": ("存档间隔", "每隔多少步保存一次模型存档，中断后可恢复", False),
     "training.value_loss_weight": ("价值损失权重", "价值头损失占总损失的比重，越大越重视胜负判断", False),
-    "mcts.num_mcts_sims": ("MCTS 模拟次数", "自对弈每步模拟多少次，越多棋力越强但越慢", False),
+    "mcts.lottery_eval_limit": ("抽奖候选评估上限", "搜索内每个抽奖结果最多用NN评估多少个候选效果（升级/生成/复活类枚举可达数百上千，全量评估会造成评估风暴）。推荐8~32；越大越精确越慢", False),
+    "mcts.virtual_loss": ("虚拟损失", "并行选路时先扣的临时失败分，用于并发互相避让。需大于真实回报尺度(终局正负1)；过大会抑制探索(抽奖易饿死)、过小避让不足。推荐范围0.3~1.0，当前默认0.5", False),
+    "mcts.num_mcts_sims": ("MCTS 模拟次数", "自对弈每步模拟多少次；实测本机在当前规则下单局极快，常用范围150~300；越大棋力基线越强但单局耗时线性增长", False),
+    "mcts.eval_material_weight": ("评估子力权重", "纯MCTS的rollout未分胜负时按子力差给连续估值(压在±权重内)，修复全零价值塌缩导致的长局闷和与抽奖饿死。推荐0.1~0.2；设0=恢复旧行为", False),
     "mcts.cpuct": ("探索常数", "越大越爱尝试新走法（探索），越小越走当前最优（利用）", False),
     "mcts.temperature": ("温度", "走子随机程度：越高越随机，1=按概率采样，0=总选概率最高", False),
     "mcts.temp_threshold": ("温度阈值", "前多少步用温度随机采样，之后贪心选最优", False),
-    "selfplay.num_games": ("自对弈局数", "每轮自对弈多少局（默认值，面板可覆盖）", False),
     "selfplay.dirichlet_alpha": ("Dirichlet α", "开局探索噪声强度，越大越鼓励尝试新走法", False),
     "selfplay.dirichlet_epsilon": ("Dirichlet ε", "噪声占先验概率的比例（0~1），越大越随机", False),
     "selfplay.max_moves": ("最大步数", "单局最大步数，超时判和", False),
-    "selfplay.parallel_games": ("并行局数", "同时自对弈几局；并行局数 × 每局MCTS线程 = 总线程数，建议等于CPU逻辑核心数", False),
-    "selfplay.mcts_threads": ("每局MCTS线程", "每局内部MCTS并行线程数。神经网络模式下多线程共享批量推理队列，不再竞争GPU", False),
-    "selfplay.neural_batch_size": ("神经网络批量大小", "GPU一次推理处理多少个局面。越大GPU利用率越高，但延迟也越高。32核CPU建议32~64", False),
-    "selfplay.neural_batch_timeout_ms": ("批量超时(ms)", "收集批量请求的最长等待毫秒数。越短延迟越低但批量可能不满，越长批量越满但线程等待更久", False),
+    "selfplay.parallel_games": ("并行局数", "同时自对弈几局；与每局线程相乘≈总线程数。实测本机(i9-13900HX)：纯MCTS模式24并行仅用约7%CPU，可大胆调大；神经模式下两者相乘≈逻辑核数(32)即可", False),
+    "selfplay.mcts_threads": ("每局MCTS线程", "每局内部并行根并行分支数；神经网络模式下自动扁平化为 N×1 共享批量推理队列，此参数仅决定总局数倍率", False),
+    "selfplay.neural_batch_size": ("神经网络批量大小", "GPU一次推理处理多少个局面。实测8GB显存训练batch128仅占1.1GB，批量推理侧很富余；推荐范围32~64，并发局多时可试128", False),
+    "selfplay.neural_batch_timeout_ms": ("批量超时(ms)", "攒批最长等待毫秒数。低并发场景(对战≤8局、请求稀疏)推荐10~15让批次更满；高并发自对弈(24局+)用默认2~5延迟更低", False),
+    "selfplay.match_parallel_games": ("对战并行局数", "同时进行多少局对战。每局同时只有一方在搜索(线程数=mcts_threads)，本机实测16局≈32线程可跑满；调大加快评测、调小减少CPU争抢", False),
+    "training.use_amp": ("混合精度(fp16)", "训练用AMP：卷积等重算子在fp16加速，BN/softmax自动保持fp32，GradScaler防下溢。实测提速约1.5~2倍；若遇NaN先关此项排查", False),
 }
 
+
+PARAM_GROUPS = [
+    ("网络结构（改动需从头训练）",
+     ["network.num_residual_blocks", "network.channels"]),
+    ("训练",
+     ["training.learning_rate", "training.batch_size", "training.weight_decay",
+      "training.num_train_steps", "training.checkpoint_interval",
+      "training.value_loss_weight", "training.use_amp"]),
+    ("全局搜索（训练与对战共用）",
+     ["mcts.num_mcts_sims", "mcts.cpuct", "mcts.temperature",
+      "mcts.temp_threshold", "mcts.eval_material_weight",
+      "mcts.virtual_loss", "mcts.lottery_eval_limit"]),
+    ("自对弈数据收集",
+     ["selfplay.dirichlet_alpha", "selfplay.dirichlet_epsilon",
+      "selfplay.max_moves", "selfplay.parallel_games",
+      "selfplay.mcts_threads", "selfplay.neural_batch_size",
+      "selfplay.neural_batch_timeout_ms"]),
+    ("对战评测",
+     ["selfplay.match_parallel_games"]),
+]
 
 def load_config():
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -113,7 +137,7 @@ class Panel:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("训练操作面板")
-        self.root.geometry("720x560")
+        self.root.geometry("1000x680")
         self.root.resizable(True, True)
 
         # 状态机
@@ -138,6 +162,12 @@ class Panel:
 
         # 对战状态
         self.match_state = "idle"   # idle/running/finished
+        self.net1_path = None
+        self.net2_path = None
+        self.mcts2_overrides = {}
+        self._match_pause_file = None
+        self._match_paused = False
+        self._match_t0 = 0.0
         self.match_process = None
         self.match_onnx = None
         self.match_dir = None
@@ -294,21 +324,29 @@ class Panel:
                  bg="#eee").grid(row=0, column=2, sticky="we", padx=1, pady=1)
 
         self.param_entries = {}
-        for i, (path, (name, desc, is_struct)) in enumerate(PARAM_INFO.items(), start=1):
-            label = name + (" [结构]" if is_struct else "")
-            tk.Label(self.param_inner, text=label, font=FONT, anchor="w",
-                     fg="#c5221f" if is_struct else "black").grid(
-                row=i, column=0, sticky="we", padx=1, pady=1)
-            entry = tk.Entry(self.param_inner, width=12, font=FONT, justify="right")
-            entry.grid(row=i, column=1, padx=1, pady=1)
-            self.param_entries[path] = entry
-            tk.Label(self.param_inner, text=desc, font=FONT, anchor="w",
-                     wraplength=420, justify="left").grid(
-                row=i, column=2, sticky="we", padx=1, pady=1)
+        row_idx = 1
+        for group_name, paths in PARAM_GROUPS:
+            tk.Label(self.param_inner, text=group_name, font=FONT_TITLE,
+                     fg="#174ea6", anchor="w", bg="#e8f0fe").grid(
+                row=row_idx, column=0, columnspan=3, sticky="we", padx=1, pady=(6, 1))
+            row_idx += 1
+            for path in paths:
+                name, desc, is_struct = PARAM_INFO[path]
+                label = name + (" [结构]" if is_struct else "")
+                tk.Label(self.param_inner, text=label, font=FONT, anchor="w",
+                         fg="#c5221f" if is_struct else "black").grid(
+                    row=row_idx, column=0, sticky="we", padx=1, pady=1)
+                entry = tk.Entry(self.param_inner, width=12, font=FONT, justify="right")
+                entry.grid(row=row_idx, column=1, padx=1, pady=1)
+                self.param_entries[path] = entry
+                tk.Label(self.param_inner, text=desc, font=FONT, anchor="w",
+                         wraplength=420, justify="left").grid(
+                    row=row_idx, column=2, sticky="we", padx=1, pady=1)
+                row_idx += 1
 
         # 确认 / 取消
         btns = tk.Frame(self.param_inner)
-        btns.grid(row=len(PARAM_INFO) + 1, column=0, columnspan=3, pady=15)
+        btns.grid(row=row_idx, column=0, columnspan=3, pady=15)
         tk.Button(btns, text="确认", width=12, font=FONT, bg="#1a73e8", fg="white",
                   command=self.on_confirm_params).pack(side="left", padx=10)
         tk.Button(btns, text="取消", width=12, font=FONT,
@@ -327,15 +365,17 @@ class Panel:
     def build_match_ui(self):
         f = self.match_frame
         f.columnconfigure(0, weight=1)
-        f.rowconfigure(4, weight=1)
+        f.rowconfigure(5, weight=1)
 
         self.match_status_label = tk.Label(f, text="对战未开始", font=FONT_TITLE,
                                            fg="#1a73e8", anchor="w", bg="white")
+        self.match_timer_label = tk.Label(f, text="00:00:00", font=("Consolas", 14),
+                                          anchor="e", bg="white")
         self.match_status_label.grid(row=0, column=0, sticky="we", padx=10, pady=(10, 2))
+        self.match_timer_label.grid(row=0, column=1, sticky="e", padx=10)
 
-        # 局数 + 文件夹名输入
         row = tk.Frame(f)
-        row.grid(row=1, column=0, sticky="we", padx=10, pady=5)
+        row.grid(row=1, column=0, columnspan=2, sticky="we", padx=10, pady=5)
         tk.Label(row, text="对局数：", font=FONT).pack(side="left")
         self.match_games_var = tk.StringVar(value="100")
         self.match_games_entry = tk.Entry(row, textvariable=self.match_games_var, width=10,
@@ -343,42 +383,49 @@ class Panel:
         self.match_games_entry.pack(side="left", padx=5)
         tk.Label(row, text="文件夹名：", font=FONT).pack(side="left", padx=(10, 2))
         self.match_folder_var = tk.StringVar(value="")
-        self.match_folder_entry = tk.Entry(row, textvariable=self.match_folder_var, width=14, font=FONT)
+        self.match_folder_entry = tk.Entry(row, textvariable=self.match_folder_var, width=14,
+                                           font=FONT)
         self.match_folder_entry.pack(side="left", padx=5)
         tk.Label(row, text="（留空=用时间）", font=FONT, fg="#666").pack(side="left")
+        self.match_prepare_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(row, text="启用准备模式", font=FONT,
+                       variable=self.match_prepare_var).pack(side="right", padx=10)
 
-        # 按钮
         btns = tk.Frame(f)
         btns.grid(row=2, column=0, sticky="we", padx=10, pady=5)
-        self.match_open_btn = tk.Button(btns, text="打开…", width=10, font=FONT,
-                                        command=self.on_match_open)
-        self.match_open_btn.pack(side="left", padx=5)
-        self.match_start_btn = tk.Button(btns, text="开始", width=10, font=FONT,
+        self.net1_btn = tk.Button(btns, text="网络1", width=8, font=FONT,
+                                  command=lambda: self.pick_net(1))
+        self.net1_btn.pack(side="left", padx=4)
+        self.net2_btn = tk.Button(btns, text="网络2", width=8, font=FONT,
+                                  command=lambda: self.pick_net(2))
+        self.net2_btn.pack(side="left", padx=4)
+        self.match_start_btn = tk.Button(btns, text="开始", width=8, font=FONT,
                                          command=self.on_match_start, bg="#1a73e8", fg="white")
-        self.match_start_btn.pack(side="left", padx=5)
-        self.match_stop_btn = tk.Button(btns, text="结束", width=10, font=FONT,
+        self.match_start_btn.pack(side="left", padx=4)
+        self.match_pause_btn = tk.Button(btns, text="暂停", width=8, font=FONT,
+                                         command=self.toggle_match_pause, state="disabled")
+        self.match_pause_btn.pack(side="left", padx=4)
+        self.match_stop_btn = tk.Button(btns, text="结束", width=8, font=FONT,
                                         command=self.on_match_stop, state="disabled")
-        self.match_stop_btn.pack(side="left", padx=5)
-        self.match_cancel_btn = tk.Button(btns, text="取消", width=10, font=FONT,
+        self.match_stop_btn.pack(side="left", padx=4)
+        self.match_cancel_btn = tk.Button(btns, text="取消", width=8, font=FONT,
                                           command=self.on_match_cancel, state="disabled")
-        self.match_cancel_btn.pack(side="left", padx=5)
-        tk.Label(btns, text="已选网络：", font=FONT).pack(side="left", padx=(15, 2))
-        self.match_onnx_label = tk.Label(btns, text="（未选择）", font=FONT, fg="#666")
-        self.match_onnx_label.pack(side="left")
-        self.match_prepare_var = tk.BooleanVar(value=False)
-        self.match_prepare_check = tk.Checkbutton(btns, text="启用准备模式", font=FONT,
-                                                  variable=self.match_prepare_var)
-        self.match_prepare_check.pack(side="left", padx=(15, 0))
+        self.match_cancel_btn.pack(side="left", padx=4)
+        self.mcts2_btn = tk.Button(btns, text="调节MCTS2参数", width=14, font=FONT,
+                                   command=self.open_mcts2_dialog)
+        self.mcts2_btn.pack(side="right", padx=4)
 
-        # 进度条
+        self.match_onnx_label = tk.Label(f, text="当前选择：未选择（网络1 vs 纯MCTS）",
+                                         font=FONT, fg="#666", anchor="w")
+        self.match_onnx_label.grid(row=3, column=0, sticky="we", padx=10)
+
         p = tk.Frame(f)
-        p.grid(row=3, column=0, sticky="we", padx=10, pady=(15, 2))
+        p.grid(row=4, column=0, sticky="we", padx=10, pady=(10, 2))
         tk.Label(p, text="对局进度", font=FONT, width=8).pack(side="left")
         self.match_progress = ProgressBar(p)
 
-        # 日志栏
         info_frame = tk.Frame(f, relief="solid", bd=1, bg="white")
-        info_frame.grid(row=4, column=0, sticky="nsew", padx=10, pady=(5, 10))
+        info_frame.grid(row=5, column=0, sticky="nsew", padx=10, pady=(5, 10))
         self.match_info_text = tk.Text(info_frame, height=8, bg="white", fg="black",
                                        font=FONT, wrap="word", state="disabled")
         info_scroll = tk.Scrollbar(info_frame, command=self.match_info_text.yview)
@@ -397,22 +444,75 @@ class Panel:
         self.match_info_text.see("end")
         self.match_info_text.config(state="disabled")
 
-    def on_match_open(self):
+    def pick_net(self, slot):
         path = filedialog.askopenfilename(
-            title="选择 onnx 网络文件",
+            title=f"选择网络{slot}的 onnx 文件",
             initialdir=RESULTS_DIR,
             filetypes=[("ONNX 模型", "*.onnx"), ("所有文件", "*.*")])
         if not path:
             return
-        self.match_onnx = path
-        self.match_onnx_label.config(text=os.path.basename(path))
-        self.match_log(f"已选择网络: {path}")
+        if slot == 1:
+            self.net1_path = path
+        else:
+            self.net2_path = path
+        self.update_net_label()
+
+    def update_net_label(self):
+        n1 = os.path.basename(self.net1_path) if self.net1_path else None
+        n2 = os.path.basename(self.net2_path) if self.net2_path else None
+        if n1 and n2:
+            txt = f"网络1: {n1}  vs  网络2: {n2}"
+        elif n1:
+            txt = f"网络1: {n1}  vs  纯MCTS"
+        elif n2:
+            txt = f"纯MCTS  vs  网络2: {n2}"
+        else:
+            txt = "MCTS1 vs MCTS2（均未选择网络）"
+        self.match_onnx_label.config(text="当前选择：" + txt)
+
+    def open_mcts2_dialog(self):
+        cfg = load_config()
+        d = tk.Toplevel(self.root)
+        d.title("调节MCTS2参数（仅影响第二个玩家）")
+        d.geometry("380x300")
+        d.grab_set()
+        fields = [
+            ("探索常数 C", "cpuct", "1.2"),
+            ("模拟次数 sims", "num_mcts_sims", "200"),
+            ("rollout深度 depth", "max_rollout_depth", "200"),
+            ("评估子力权重 w", "eval_material_weight", "0.15"),
+            ("虚拟损失 vl", "virtual_loss", "0.5"),
+            ("抽奖倍率 mult", "lottery_multiplier", "1.0"),
+        ]
+        entries = {}
+        for i, (label, key, dflt) in enumerate(fields):
+            tk.Label(d, text=label, font=FONT).grid(row=i, column=0, sticky="w",
+                                                    padx=10, pady=4)
+            cur = cfg.get("mcts", {}).get(key, dflt)
+            e = tk.Entry(d, width=12, font=FONT, justify="right")
+            e.insert(0, str(cur))
+            e.grid(row=i, column=1, padx=10, pady=4)
+            entries[key] = e
+        tk.Label(d, text="留空 = 继承全局值", font=FONT, fg="#666").grid(
+            row=len(fields), column=0, columnspan=2)
+
+        def confirm():
+            ov = {}
+            for key, e in entries.items():
+                v = e.get().strip()
+                if v:
+                    ov[key] = v
+            self.mcts2_overrides = ov
+            spec = ",".join(f"{k}={v}" for k, v in ov.items()) or "-"
+            self.mcts2_spec_var.set(spec)
+            d.destroy()
+
+        tk.Button(d, text="确定", width=10, font=FONT, bg="#1a73e8", fg="white",
+                  command=confirm).grid(row=len(fields) + 1, column=0, columnspan=2,
+                                        pady=10)
 
     def on_match_start(self):
         if self.match_state == "running":
-            return
-        if not self.match_onnx or not os.path.exists(self.match_onnx):
-            messagebox.showerror("错误", "请先点击“打开”选择一个 onnx 网络文件")
             return
         try:
             self.match_target = int(self.match_games_var.get())
@@ -423,17 +523,26 @@ class Panel:
             messagebox.showerror("错误", "对局数必须 > 0")
             return
 
-        # 创建输出文件夹（training 之外；留空用时间）
         folder_name = self.match_folder_var.get().strip()
         if not folder_name:
             folder_name = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
         self.match_dir = os.path.join(MATCH_RESULTS_DIR, folder_name)
         os.makedirs(self.match_dir, exist_ok=True)
         progress_file = os.path.join(self.match_dir, "progress.txt")
+        pause_file = os.path.join(self.match_dir, "pause.flag")
+        if os.path.exists(pause_file):
+            os.remove(pause_file)
+        self._match_pause_file = pause_file
+        self._match_paused = False
 
         prepare_flag = "1" if self.match_prepare_var.get() else "0"
-        cmd = [DOTNET, COLLECTOR_DLL, "match", str(self.match_target), self.match_onnx,
-               self.match_dir, progress_file, prepare_flag]
+        net1 = self.net1_path or "none"
+        net2 = self.net2_path or "none"
+        m2parts = [f"{k}={v}" for k, v in self.mcts2_overrides.items()]
+        m2spec = ",".join(m2parts) if m2parts else "-"
+
+        cmd = [DOTNET, COLLECTOR_DLL, "match", str(self.match_target), net1,
+               self.match_dir, progress_file, pause_file, prepare_flag, net2, m2spec]
         log_path = os.path.join(self.match_dir, "log.txt")
         logf = open(log_path, "w", encoding="utf-8")
         no_window = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
@@ -448,10 +557,33 @@ class Panel:
             return
 
         self.match_state = "running"
+        self._match_paused = False
+        self._match_t0 = time.time()
         self.match_progress.set(0, f"0/{self.match_target} (0.0%)")
         self.match_status_label.config(text="对战中", fg="#1a73e8")
         self.update_match_buttons()
-        self.match_log(f"开始对战：{os.path.basename(self.match_onnx)} vs 纯 MCTS × {self.match_target} 局")
+        self.match_log(f"开始对战 × {self.match_target} 局")
+
+    def toggle_match_pause(self):
+        if self.match_state != "running":
+            return
+        pf = getattr(self, "_match_pause_file", None)
+        if not pf:
+            return
+        if not self._match_paused:
+            with open(pf, "w") as f:
+                f.write("pause")
+            self._match_paused = True
+            self.match_pause_btn.config(text="继续")
+            self.match_status_label.config(text="对战已暂停", fg="#e8710a")
+            self.match_log("已暂停")
+        else:
+            if os.path.exists(pf):
+                os.remove(pf)
+            self._match_paused = False
+            self.match_pause_btn.config(text="暂停")
+            self.match_status_label.config(text="对战中", fg="#1a73e8")
+            self.match_log("继续对战")
 
     def on_match_stop(self):
         if self.match_state != "running":
@@ -467,8 +599,7 @@ class Panel:
         self.update_match_buttons()
 
     def on_match_cancel(self):
-        """取消对战：停止进程、删除本次记录、回到可重新开始状态（不关程序）。"""
-        if self.match_state != "running":
+        if self.match_state not in ("running", "paused"):
             return
         ok = messagebox.askyesno("确认", "确定取消本次对战吗？\n（本次对战的所有记录将被删除）")
         if not ok:
@@ -488,6 +619,7 @@ class Panel:
         self.match_state = "idle"
         self.match_process = None
         self.match_dir = None
+        self._match_paused = False
         self.match_progress.set(0, "0/0 (0.0%)")
         self.match_status_label.config(text="对战未开始（已取消）", fg="#e8710a")
         self.update_match_buttons()
@@ -496,20 +628,27 @@ class Panel:
     def update_match_buttons(self):
         if self.match_state == "running":
             self.match_start_btn.config(state="disabled")
-            self.match_open_btn.config(state="disabled")
+            self.net1_btn.config(state="disabled")
+            self.net2_btn.config(state="disabled")
+            self.mcts2_btn.config(state="disabled")
+            self.match_games_entry.config(state="disabled")
+            self.match_pause_btn.config(state="normal", text="暂停")
             self.match_stop_btn.config(state="normal")
             self.match_cancel_btn.config(state="normal")
-            self.match_games_entry.config(state="disabled")
+        elif self.match_state == "paused":
+            self.match_pause_btn.config(state="normal", text="继续")
+            self.match_stop_btn.config(state="normal")
+            self.match_cancel_btn.config(state="normal")
         else:
             self.match_start_btn.config(state="normal")
-            self.match_open_btn.config(state="normal")
+            self.net1_btn.config(state="normal")
+            self.net2_btn.config(state="normal")
+            self.mcts2_btn.config(state="normal")
+            self.match_games_entry.config(state="normal")
+            self.match_pause_btn.config(state="disabled", text="暂停")
             self.match_stop_btn.config(state="disabled")
             self.match_cancel_btn.config(state="disabled")
-            self.match_games_entry.config(state="normal")
 
-    # ================================================================
-    # 超参数
-    # ================================================================
     def load_params_into_ui(self):
         cfg = load_config()
         for path, entry in self.param_entries.items():
@@ -520,10 +659,14 @@ class Panel:
         cfg = load_config()
         for path, entry in self.param_entries.items():
             try:
-                val = float(entry.get())
+                raw = entry.get().strip()
                 old = get_nested(cfg, path)
-                if isinstance(old, int):
-                    val = int(val)
+                if isinstance(old, bool):
+                    val = raw.lower() in ("1", "true", "yes", "on", "开")
+                elif isinstance(old, int):
+                    val = int(float(raw))
+                else:
+                    val = float(raw)
                 set_nested(cfg, path, val)
             except ValueError:
                 messagebox.showerror("错误", f"超参数 {path} 的值不是数字")
@@ -1132,6 +1275,11 @@ class Panel:
                     self.finish_training(interrupted=(self.train_process.returncode != 0))
 
         # 对战进度（从 progress.txt 按局数）
+        # 对战计时器
+        if self.match_state == "running" and not getattr(self, "_match_paused", False):
+            self.match_timer_label.config(text=time.strftime(
+                "%H:%M:%S", time.gmtime(time.time() - self._match_t0)))
+
         if self.match_state == "running" and self.match_dir:
             m_progress = os.path.join(self.match_dir, "progress.txt")
             if os.path.exists(m_progress):
@@ -1188,9 +1336,23 @@ class Panel:
                 if os.path.exists(csv_path):
                     try:
                         no_window = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
-                        subprocess.run([PYTHON_EXE, PLOT_MATCH_PY, csv_path],
-                                       creationflags=no_window, timeout=60)
-                        self.match_log("已自动生成 3 张图表")
+                        if self.net1_path is None and self.net2_path is None:
+                            self.match_log("MCTS vs MCTS 模式不生成统计图")
+                        else:
+                            n1 = (os.path.splitext(os.path.basename(self.net1_path))[0]
+                                  if self.net1_path else "纯MCTS")
+                            n2 = (os.path.splitext(os.path.basename(self.net2_path))[0]
+                                  if self.net2_path else "纯MCTS")
+                            if self.net1_path is None and self.net2_path is None:
+                                self.match_log("MCTS vs MCTS 模式不生成统计图")
+                            else:
+                                try:
+                                    subprocess.run([PYTHON_EXE, PLOT_MATCH_PY, csv_path,
+                                                    n1, n2],
+                                                   creationflags=no_window, timeout=60)
+                                except Exception as e:
+                                    self.match_log(f"绘图失败: {e}")
+                            self.match_log("已自动生成 3 张图表")
                     except Exception as e:
                         self.match_log(f"生成图表失败: {e}")
 
