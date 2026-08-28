@@ -34,6 +34,9 @@ double temperature = 1.0;
 int tempThreshold = 15;
 double cpuct = 1.2;
 int maxMoves = 400;
+double evalMaterialWeight = 0.15;
+double virtualLossValue = 0.5;
+int lotteryEvalLimit = 16;
 int neuralBatchSize = 32;
 int neuralBatchTimeoutMs = 2; // ms
 try
@@ -44,6 +47,12 @@ try
     temperature = mcts.GetProperty("temperature").GetDouble();
     tempThreshold = mcts.GetProperty("temp_threshold").GetInt32();
     cpuct = mcts.GetProperty("cpuct").GetDouble();
+    if (mcts.TryGetProperty("eval_material_weight", out var emwEl))
+        evalMaterialWeight = emwEl.GetDouble();
+    if (mcts.TryGetProperty("virtual_loss", out var vlEl))
+        virtualLossValue = vlEl.GetDouble();
+    if (mcts.TryGetProperty("lottery_eval_limit", out var lelEl))
+        lotteryEvalLimit = lelEl.GetInt32();
     var sp = doc.RootElement.GetProperty("selfplay");
     parallelGames = sp.GetProperty("parallel_games").GetInt32();
     mctsThreads = sp.GetProperty("mcts_threads").GetInt32();
@@ -62,23 +71,37 @@ catch
 
 Console.OutputEncoding = System.Text.Encoding.UTF8;
 
-// ── 模式 2：对战评测 ──
+// ── 模式 2：对战评测（泛化：网络1/网络2/MCTS 组合）──
 if (args.Length >= 1 && args[0] == "match")
 {
     if (args.Length < 4)
     {
-        Console.WriteLine("用法: SelfPlayCollector match <numGames> <onnxPath> <outputDir> [progressFile]");
+        Console.WriteLine("用法: SelfPlayCollector match <numGames> <net1|none> <outputDir> <progress> <pause> <prepare> [net2|none] [mcts2spec]");
         return;
     }
     int matchGames = int.Parse(args[1]);
-    string matchOnnx = args[2];
+    string net1 = args[2] == "none" ? null : args[2];
     string matchOutDir = Path.GetFullPath(args[3]);
     string matchProgress = args.Length > 4 ? args[4] : null;
-    bool matchPrepare = args.Length > 5 && args[5] == "1";
-    int matchSims = Math.Min(numSims, 100); // 评测用较少模拟（更快，双方仍公平）
-    int matchParallel = Math.Min(parallelGames, 8); // 控制并发，避免线程过载
-    MatchProgram.Run(matchGames, matchOnnx, matchOutDir, matchSims, mctsThreads,
-        maxMoves, cpuct, matchParallel, matchProgress, matchPrepare);
+    string matchPauseFlag = args.Length > 5 && args[5] != "-" && args[5] != "" ? args[5] : null;
+    bool matchPrepare = args.Length > 6 && args[6] == "1";
+    string net2 = args.Length > 7 && args[7] != "-" && args[7] != "" && File.Exists(args[7]) ? args[7] : null;
+    if (net1 == "none" || (net1 != null && !File.Exists(net1))) net1 = null;
+    string mcts2spec = args.Length > 8 ? args[8] : "";
+
+    int matchParallel = parallelGames;
+    try
+    {
+        using var doc2 = JsonDocument.Parse(File.ReadAllText(configPath));
+        var sp2 = doc2.RootElement.GetProperty("selfplay");
+        if (sp2.TryGetProperty("match_parallel_games", out var mpEl))
+            matchParallel = mpEl.GetInt32();
+    }
+    catch { }
+    // 对战模拟数固定等于全局 mcts.num_mcts_sims（公平性要求）
+    MatchProgram.Run(matchGames, net1, net2, mcts2spec, matchOutDir, numSims, mctsThreads,
+        maxMoves, cpuct, matchParallel, matchProgress, matchPrepare,
+        evalMaterialWeight, virtualLossValue, lotteryEvalLimit, matchPauseFlag);
     return;
 }
 
@@ -103,4 +126,5 @@ Console.WriteLine($"温度: {temperature}（前 {tempThreshold} 步）| Dirichle
 SelfPlayTrainer.Run(numGames, numSims, mctsThreads, parallelGames, dataDir,
     progressFile, pauseFlag, onnxPath,
     dirichletAlpha, dirichletEpsilon, temperature, tempThreshold, cpuct, maxMoves,
-    neuralBatchSize, neuralBatchTimeoutMs);
+    neuralBatchSize, neuralBatchTimeoutMs, evalMaterialWeight,
+    virtualLossValue);
