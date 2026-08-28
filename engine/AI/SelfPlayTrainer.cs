@@ -33,7 +33,9 @@ public static class SelfPlayTrainer
         string onnxPath = null, double dirichletAlpha = 0.3,
         double dirichletEpsilon = 0.25, double temperature = 1.0,
         int tempThreshold = 15, double cpuct = 1.2, int maxMoves = 400,
-        int neuralBatchSize = 32, int neuralBatchTimeoutMs = 2)
+        int neuralBatchSize = 32, int neuralBatchTimeoutMs = 2,
+        double evalMaterialWeight = 0.15,
+        double virtualLossValue = 0.5)
     {
         Directory.CreateDirectory(dataDir);
 
@@ -51,18 +53,10 @@ public static class SelfPlayTrainer
             Console.WriteLine($"已加载网络指导自对弈: {onnxPath}");
         }
 
-        // ── 扁平化并行（神经网络模式）──
-        // 消除嵌套 Parallel.For：parallelGames 个外层线程阻塞等待内层完成，纯浪费。
-        // 展开为 parallelGames×mctsThreads 个扁平并行对局，每局 1 线程 MCTS。
+        // 树内并行（virtual loss）：每局 mctsThreads 个 worker 共享同一棵树，
+        // 神经网络模式下 NN 请求密度 ×mctsThreads，批量推理攒得更快。
         int effectiveParallel = parallelGames;
         int effectiveThreads = mctsThreads;
-        if (hasOnnxPath)
-        {
-            effectiveThreads = 1;
-            effectiveParallel = parallelGames * mctsThreads;
-            Console.WriteLine($"[神经网络模式] 扁平化: {effectiveParallel} 局 × 1 线程" +
-                              $"（原 {parallelGames} × {mctsThreads}，消除 {parallelGames} 个阻塞外层线程）");
-        }
 
         int totalThreads = effectiveParallel * effectiveThreads;
         System.Threading.ThreadPool.SetMinThreads(totalThreads + 4, totalThreads + 4);
@@ -70,7 +64,7 @@ public static class SelfPlayTrainer
         Console.WriteLine($"自对弈 {numGames} 局 | 每步 {numSims} sims | " +
                           $"{effectiveParallel} 局并行 × {effectiveThreads} MCTS 线程 = {totalThreads} 线程" +
                           (hasOnnxPath
-                              ? $" | 共享 1 Session + 流水线批量推理(batch={neuralBatchSize})"
+                              ? $" | 树内并行(virtual loss) + 共享 Session 批量推理(batch={neuralBatchSize})"
                               : " | 纯 MCTS"));
 
         int completed = 0;
@@ -86,7 +80,8 @@ public static class SelfPlayTrainer
                 var sw = System.Diagnostics.Stopwatch.StartNew();
                 int moves = RunSingleGame(gameIdx, numSims, effectiveThreads, dataDir, sharedNeural,
                     dirichletAlpha, dirichletEpsilon, temperature, tempThreshold, cpuct, maxMoves,
-                    pauseFlag);
+                    pauseFlag, evalMaterialWeight,
+            virtualLossValue);
                 sw.Stop();
                 Console.WriteLine($"第 {gameIdx + 1}/{numGames} 局完成，用时 {sw.Elapsed.TotalSeconds:F1} 秒，步数 {moves}");
 
@@ -110,14 +105,19 @@ public static class SelfPlayTrainer
     private static int RunSingleGame(int gameIdx, int numSims, int mctsThreads,
         string dataDir, NeuralMcts neural, double dirichletAlpha,
         double dirichletEpsilon, double temperature, int tempThreshold, double cpuct,
-        int maxMoves, string pauseFlag)
+        int maxMoves, string pauseFlag, double evalMaterialWeight,
+        double virtualLossValue)
     {
         var red = new AIPlayer(numSims, C: cpuct, seed: gameIdx * 2 + 1,
             aiTeam: 1, threadCount: mctsThreads, neural: neural,
-            dirichletAlpha: dirichletAlpha, dirichletEpsilon: dirichletEpsilon);
+            dirichletAlpha: dirichletAlpha, dirichletEpsilon: dirichletEpsilon,
+            evalMaterialWeight: evalMaterialWeight,
+            virtualLossValue: virtualLossValue);
         var black = new AIPlayer(numSims, C: cpuct, seed: gameIdx * 2 + 2,
             aiTeam: -1, threadCount: mctsThreads, neural: neural,
-            dirichletAlpha: dirichletAlpha, dirichletEpsilon: dirichletEpsilon);
+            dirichletAlpha: dirichletAlpha, dirichletEpsilon: dirichletEpsilon,
+            evalMaterialWeight: evalMaterialWeight,
+            virtualLossValue: virtualLossValue);
 
         var state = new Gamestate();
         state.prepareModeOn = false;

@@ -114,11 +114,17 @@ public class MctsEngine
     private double dirichletAlpha;    // Dirichlet 噪声浓度（>0 时根节点加噪声，鼓励探索）
     private double dirichletEpsilon;  // 噪声混合比例
 
+    private double evalMaterialWeight;
+    private int lotteryEvalLimit;
+
     public MctsEngine(int simulations = 1000, double C = 1.2, int maxRolloutDepth = 200,
         bool allowLottery = true, int aiTeam = 0,
         double lotteryCMultiplier = 1.0, bool useLotteryChanceNodes = false,
         int threadCount = 1, NeuralMcts neural = null,
-        double dirichletAlpha = 0, double dirichletEpsilon = 0)
+        double dirichletAlpha = 0, double dirichletEpsilon = 0,
+        double evalMaterialWeight = 0.15,
+        double virtualLossValue = 0.5,
+        int lotteryEvalLimit = 16)
     {
         this.maxSimulations = simulations;
         this.explorationConstant = C;
@@ -131,6 +137,9 @@ public class MctsEngine
         this.neural = neural;
         this.dirichletAlpha = dirichletAlpha;
         this.dirichletEpsilon = dirichletEpsilon;
+        this.evalMaterialWeight = evalMaterialWeight;
+        this.virtualLossValue = virtualLossValue;
+        this.lotteryEvalLimit = lotteryEvalLimit;
     }
 
     // ================================================================
@@ -191,6 +200,26 @@ public class MctsEngine
         return dist;
     }
 
+    /// <summary>
+    /// 【诊断专用】返回根节点每个子动作的统计信息（含被 pruned 的），
+    /// 用于排查“抽奖从未被选中”这类问题。不改变任何搜索行为。
+    /// Q 为执行该动作一方视角的均值。
+    /// </summary>
+    public List<(GameAction action, string desc, bool isChance,
+                 double prior, int visits, double q, bool pruned)> GetRootChildStats(
+        Gamestate state, System.Random rng, RepetitionTracker history)
+    {
+        MctsNode root = RunMcts(state, rng, history);
+        var stats = new List<(GameAction, string, bool, double, int, double, bool)>();
+        foreach (MctsNode c in root.children)
+        {
+            double q = c.visitCount > 0 ? c.totalValue / c.visitCount : 0.0;
+            stats.Add((c.action, c.action?.GetDescription() ?? "(null)", c.IsChanceNode,
+                       c.prior, c.visitCount, q, c.pruned));
+        }
+        return stats;
+    }
+
     public void ExecuteAction(Gamestate state, GameAction action, System.Random rng)
     {
         if (action is LotteryAction)
@@ -218,53 +247,242 @@ public class MctsEngine
         return RunMcts(state, rng, null);
     }
 
-    /// <summary>根并行化 MCTS，支持传入真实对局历史（每个线程 Clone 一份）</summary>
+    /// <summary>根并行化 MCTS，支持传入真实对局历史。</summary>
     private MctsNode RunMcts(Gamestate state, System.Random rng, RepetitionTracker history)
     {
         if (threadCount <= 1)
             return RunMctsSingle(state, rng, null, history);
-
-        // ── 根并行化 ──
-        int threads = Math.Min(threadCount, maxSimulations);
-        int simsPerThread = maxSimulations / threads;
-        int remainder = maxSimulations % threads;
-        var partialRoots = new MctsNode[threads];
-
-        Parallel.For(0, threads, t =>
-        {
-            int sims = simsPerThread + (t < remainder ? 1 : 0);
-            var localRng = new System.Random(rng.Next());
-            partialRoots[t] = RunMctsSingle(state, localRng, sims, history);
-        });
-
-        // ── 合并根节点的子节点 ──
-        var mergedRoot = new MctsNode(null, null);
-        var childIndex = new Dictionary<string, (MctsNode child, int visits, double value)>();
-
-        foreach (var root in partialRoots)
-        {
-            mergedRoot.visitCount += root.visitCount;
-            foreach (var child in root.children)
-            {
-                string key = ActionKey(child.action);
-                if (!childIndex.TryGetValue(key, out var entry))
-                    childIndex[key] = (child, 0, 0);
-                entry = childIndex[key];
-                childIndex[key] = (child, entry.visits + child.visitCount,
-                                   entry.value + child.totalValue);
-            }
-        }
-
-        foreach (var (key, entry) in childIndex)
-        {
-            var mc = new MctsNode(entry.child.action, mergedRoot);
-            mc.visitCount = entry.visits;
-            mc.totalValue = entry.value;
-            mergedRoot.children.Add(mc);
-        }
-
-        return mergedRoot;
+        return RunMctsTreeParallel(state, rng, history);
     }
+
+    private readonly object _treeLock = new object();
+    private double virtualLossValue;
+
+    private MctsNode RunMctsTreeParallel(Gamestate state, System.Random rng,
+        RepetitionTracker history)
+    {
+        var root = new MctsNode(null, null);
+        int threads = Math.Min(threadCount, maxSimulations);
+
+        var seeds = new int[threads];
+        lock (rng)
+        {
+            for (int t = 0; t < threads; t++) seeds[t] = rng.Next();
+        }
+
+        int per = maxSimulations / threads;
+        int rem = maxSimulations % threads;
+        System.Threading.Tasks.Parallel.For(0, threads, w =>
+        {
+            int mySims = per + (w < rem ? 1 : 0);
+            var wr = new System.Random(seeds[w]);
+            for (int s = 0; s < mySims; s++)
+                WorkerSim(root, state, history, wr);
+        });
+        return root;
+    }
+
+    /// <summary>
+    /// 单个 worker 执行一次完整模拟。虚拟损失在选择经过每条边时立即扣减，
+    /// BackpropAggregate 回传时补偿并累加真实结果 —— 统计口径与串行一致。
+    /// </summary>
+    private void WorkerSim(MctsNode root, Gamestate rootState,
+        RepetitionTracker history, System.Random wr)
+    {
+        var prunedThisSim = new List<MctsNode>();
+        try
+        {
+            var ws = rootState.DeepClone();              // 线程私有工作副本
+            var trk = history?.Clone() ?? new RepetitionTracker();
+            var node = root;
+            var path = new List<MctsNode>(64);           // 本 sim 经过的已扣 VL 边
+            MctsNode leafFound = null;
+
+            while (true)
+            {
+                if (IsTerminal(ws)) break;               // 树中途撞上终局
+
+                // ── ChanceNode：采样 outcome，锁内确保唯一创建 ──
+                if (node.IsChanceNode)
+                {
+                    int outcome = wr.Next(1, 41);
+                    ((LotteryAction)node.action).lastOutcome = outcome;
+                    MctsNode oc;
+                    lock (_treeLock)
+                    {
+                        if (node.outcomeChildren == null)
+                            node.outcomeChildren = new Dictionary<int, MctsNode>();
+                        if (!node.outcomeChildren.TryGetValue(outcome, out oc))
+                        {
+                            var chs = LotteryResolver.GetChoices(ws, outcome);
+                            LotteryChoice fc;
+                            if (chs.Count == 0) fc = null;
+                            else if (neural == null) fc = chs[wr.Next(chs.Count)];
+                            else
+                            {
+                                // 候选可能成百上千（双生成枚举目标对）：
+                                // 全量价值评估会造成评估风暴，超限等距抽样
+                                if (chs.Count > lotteryEvalLimit)
+                                {
+                                    int stepN = chs.Count / lotteryEvalLimit;
+                                    var sub = new List<LotteryChoice>(lotteryEvalLimit);
+                                    for (int ci = 0; ci < chs.Count && sub.Count < lotteryEvalLimit; ci += stepN)
+                                        sub.Add(chs[ci]);
+                                    chs = sub;
+                                }
+                                fc = SelectLotteryChoiceByValue(ws, outcome, chs);
+                            }
+                            oc = new MctsNode(null, node) { fixedChoice = fc };
+                            node.outcomeChildren[outcome] = oc;
+                        }
+                        oc.visitCount++;
+                        oc.totalValue -= virtualLossValue;
+                        path.Add(oc);
+                    }
+                    if (oc.fixedChoice == null)
+                        LotteryResolver.ResolveChoice(ws, outcome, null);
+                    else
+                        LotteryResolver.ResolveChoice(ws, outcome, oc.fixedChoice);
+                    GameAction.EndTurn(ws);
+                    trk.AddState(ws, isLottery: true);   // 抽奖豁免重复计数
+                    node = oc;
+                    continue;
+                }
+
+                // ── 普通 / 叶判定与选路（统计变更段加锁）──
+                bool reachedLeaf = false;
+                bool exhausted = false;
+                MctsNode nextNode = null;
+                MctsNode pendingChance = null;
+                GameAction pendingEdge = null;
+
+                lock (_treeLock)
+                {
+                    if (node.children.Count == 0)
+                    {
+                        leafFound = node;                 // 出锁后评估+展开
+                        reachedLeaf = true;
+                    }
+                    else
+                    {
+                        while (true)
+                        {
+                            var child = BestPuctChild(node, wr);
+                            if (child == null) { exhausted = true; break; }
+                            if (child.IsChanceNode)
+                            {
+                                child.visitCount++;
+                                child.totalValue -= virtualLossValue;
+                                path.Add(child);
+                                pendingChance = child;    // 不在此执行
+                                node = child;
+                                break;
+                            }
+                            if (!IsActionValid(child.action, ws))
+                            {
+                                child.pruned = true;      // 非法是永久的
+                                continue;
+                            }
+                            var ts = ws.DeepClone();
+                            ExecuteAction(ts, child.action, wr);
+                            if (trk.WouldRepeat(ts))
+                            {
+                                child.pruned = true;
+                                prunedThisSim.Add(child); // 仅本 sim 临时
+                                continue;
+                            }
+                            child.visitCount++;
+                            child.totalValue -= virtualLossValue;
+                            path.Add(child);
+                            nextNode = child;
+                            pendingEdge = child.action;
+                            node = child;
+                            break;
+                        }
+                    }
+                }
+
+                foreach (var n in prunedThisSim) n.pruned = false;
+                prunedThisSim.Clear();
+
+                if (reachedLeaf || exhausted) break;
+
+                if (pendingChance != null) { continue; }  // 执行交由下一轮 Chance 分支
+
+                ExecuteAction(ws, pendingEdge, wr);       // 普通边确认执行（锁外）
+                trk.AddState(ws, false);
+                _ = nextNode;                              // node 已在锁内前移
+            }
+
+            // ── 叶评估（全部在锁外）──
+            double result;
+            float[] priors = null;
+            if (IsTerminal(ws))
+                result = Evaluate(ws);
+            else if (neural != null)
+            {
+                var (pol, vNet) = neural.PredictBlocking(ws);
+                priors = pol;
+                result = ws.currentTeam == -1 ? -vNet : vNet;
+            }
+            else
+                result = Simulate(ws, wr);
+
+            // 展开（若刚才到达的是未展开叶；存在竞态时幂等跳过）
+            if (!IsTerminal(ws) && leafFound != null && leafFound.children.Count == 0)
+            {
+                lock (_treeLock)
+                {
+                    if (leafFound.children.Count == 0 && !IsTerminal(ws))
+                    {
+                        ExpandAll(leafFound, ws, priors);
+                        if (leafFound == root && dirichletAlpha > 0 && dirichletEpsilon > 0)
+                            AddDirichletNoise(root, wr);
+                    }
+                }
+            }
+
+            BackpropAggregate(path, leafFound, result, root);
+        }
+        finally
+        {
+            foreach (var n in prunedThisSim) n.pruned = false;
+        }
+    }
+
+    /// <summary>
+    /// 回传：①补偿路径上所有虚拟损失；②按串行一致的翻转规则自叶向上累加真实结果；
+    /// 含叶节点与根节点的访问计数（保持 parentVisits 口径）。
+    /// </summary>
+    private void BackpropAggregate(List<MctsNode> path, MctsNode leaf,
+        double result, MctsNode root)
+    {
+        lock (_treeLock)
+        {
+            foreach (var n in path)
+                n.totalValue += virtualLossValue;         // 补偿选择期的 -VL
+
+            double r = result;
+            if (leaf != null)
+            {
+                leaf.visitCount++;
+                if (leaf.action != null) r = -r;          // 翻转规则与串行一致
+                leaf.totalValue += r;
+            }
+
+            for (int i = path.Count - 1; i >= 0; i--)
+            {
+                var n = path[i];
+                if (n.action != null) r = -r;
+                n.totalValue += r;
+            }
+
+            // 串行版会把根也计入 visitCount/totalValue（PUCT 的 parentVisits 依赖它）
+            root.visitCount++;
+            root.totalValue += r;
+        }
+    }
+
 
     /// <summary>单线程 MCTS（可指定模拟次数，供并行版调用）</summary>
     private MctsNode RunMctsSingle(Gamestate state, System.Random rng, int? simsOverride = null)
@@ -298,10 +516,13 @@ public class MctsEngine
             try { leaf = Select(root, workState, rng, simTracker, prunedThisSelect); }
             catch (Exception ex)
             { throw new Exception($"Select failed at sim {validSims}: {ex.Message}", ex); }
-
-            // 清除本次 Select 的临时剪枝标记（重复剪枝只在单次模拟内有效）
-            foreach (var n in prunedThisSelect)
-                n.pruned = false;
+            finally
+            {
+                // 异常安全清除临时剪枝标记（重复剪枝只在单次模拟内有效）；
+                // 与“合法性失败”的永久标记区分开，防止临时标记泄漏成永久剪枝
+                foreach (var n in prunedThisSelect)
+                    n.pruned = false;
+            }
 
             // leaf == null 表示该模拟因所有走法被剪枝而无法继续，不计入有效次数
             if (leaf == null)
@@ -363,10 +584,10 @@ public class MctsEngine
             // ── ChanceNode: 随机采样 outcome，创建子节点，继续深入 ──
             if (node.IsChanceNode)
             {
-                MctsNode result = HandleChanceNode(node, state, rng, repetitionTracker);
-                if (result == node)
-                    return node;          // PW 限制达到，叶节点
-                node = result;            // outcome 子节点，继续循环
+                // HandleChanceNode 采样 outcome、执行（固化 choice 重放）并返回 outcome 子节点。
+                // 抽奖的执行只发生在这里；Select 的“确认执行”段必须跳过 ChanceNode，
+                // 否则会叠加执行两次抽奖效果（历史重大 bug）
+                node = HandleChanceNode(node, state, rng, repetitionTracker);
                 continue;
             }
 
@@ -380,7 +601,7 @@ public class MctsEngine
             MctsNode child = null;
             while (true)
             {
-                child = BestPuctChild(node);
+                child = BestPuctChild(node, rng);
                 if (child == null)
                     return null; // 所有走法都不可用
 
@@ -410,9 +631,15 @@ public class MctsEngine
                 break; // 找到合法且不重复的子节点
             }
 
-            // 确认执行：推进真实 state 和 tracker
-            ExecuteAction(state, child.action, rng);
-            repetitionTracker.AddState(state);
+            // 确认执行：推进真实 state 和 tracker。
+            // 注意：ChanceNode（抽奖）子节点不在此执行——
+            // 它的执行（含重复豁免计数）由 HandleChanceNode 统一负责，
+            // 这里若执行会造成双重抽奖效果叠加
+            if (!child.IsChanceNode)
+            {
+                ExecuteAction(state, child.action, rng);
+                repetitionTracker.AddState(state);
+            }
 
             node = child;
         }
@@ -424,9 +651,10 @@ public class MctsEngine
     //  HandleChanceNode — Scheme B 抽奖随机节点
     //
     //  均匀随机采样 outcome (1~40)，执行效果，推进 state。
-    //  使用 Progressive Widening 创建 outcome 子节点：
-    //    最大子节点数 ≈ sqrt(visitCount) + 3
-    //  返回 outcome 子节点（继续深入）或原节点（PW 限制，叶节点）。
+    //  outcome 子节点按需懒创建（每个 ChanceNode 至多 40 个），
+    //  首建时固化本 outcome 实际执行的 LotteryChoice，重放时原样复现，
+    //  保证同一 outcome 子节点永远对应同一个具体局面序列。
+    //  返回 outcome 子节点（继续深入）。
     // ================================================================
 
     private MctsNode HandleChanceNode(MctsNode node, Gamestate state, System.Random rng,
@@ -436,22 +664,46 @@ public class MctsEngine
         node.sampledOutcome = outcome;
         ((LotteryAction)node.action).lastOutcome = outcome;
 
-        ExecuteLotteryOutcome(state, outcome, rng);
+        // 查找已有 outcome 子节点
+        if (node.outcomeChildren == null)
+            node.outcomeChildren = new Dictionary<int, MctsNode>();
+
+        if (!node.outcomeChildren.TryGetValue(outcome, out MctsNode oc))
+        {
+            // 新建 outcome 子节点：确定并固化本次实际执行的 LotteryChoice。
+            // 纯 MCTS 下 choice 选择带随机性；此后每次经过该子节点必须原样重放，
+            // 否则同一子节点对应不同具体局面，破坏子树状态一致性（历史 bug 根源）
+            List<LotteryChoice> choices = LotteryResolver.GetChoices(state, outcome);
+            // 候选可能成百上千（双生成枚举目标对）：全量评估会造成评估风暴，超限等距抽样
+            if (choices.Count > lotteryEvalLimit)
+            {
+                int stepN = choices.Count / lotteryEvalLimit;
+                var sub = new List<LotteryChoice>(lotteryEvalLimit);
+                for (int ci = 0; ci < choices.Count && sub.Count < lotteryEvalLimit; ci += stepN)
+                    sub.Add(choices[ci]);
+                choices = sub;
+            }
+            LotteryChoice fixedChoice;
+            if (choices.Count == 0)
+                fixedChoice = null; // 无可选目标，交给 Resolver 的自动路径
+            else
+                fixedChoice = neural == null
+                    ? choices[rng.Next(choices.Count)]
+                    : SelectLotteryChoiceByValue(state, outcome, choices);
+
+            oc = new MctsNode(null, node) { fixedChoice = fixedChoice }; // outcome 子节点无 action
+            node.outcomeChildren[outcome] = oc;
+        }
+
+        // 执行效果（重放固化的 choice 或自动路径）+ 回合切换。
+        // 注意此处不再每次到达重新随机选 choice —— 修复纯 MCTS 下
+        // 同一 outcome 子节点对应不同具体局面的问题
+        LotteryResolver.ResolveChoice(state, outcome, oc.fixedChoice);
         GameAction.EndTurn(state);
 
         // 抽奖豁免重复检测——不剪枝、不判负
         repetitionTracker.AddState(state, isLottery: true);
 
-        // 查找已有 outcome 子节点
-        if (node.outcomeChildren == null)
-            node.outcomeChildren = new Dictionary<int, MctsNode>();
-
-        if (node.outcomeChildren.TryGetValue(outcome, out MctsNode oc))
-            return oc; // 已有子节点 → 继续深入
-
-        // 抽奖 outcome 均匀随机，不做 Progressive Widening，广度优先展开所有 40 个 outcome
-        oc = new MctsNode(null, node); // outcome 子节点无 action
-        node.outcomeChildren[outcome] = oc;
         return oc;
     }
 
@@ -477,46 +729,30 @@ public class MctsEngine
         LotteryResolver.ResolveChoice(state, outcome, selected);
     }
 
+    /// <summary>
+    /// 候选效果选择：用 F1 子力差启发式静态评估（选使对手局面最差的效果）。
+    /// 【性能关键】不再调用神经网络——此函数在搜索内部高频触发，
+    /// 旧版直连 session.Run 与批量流水线争抢 GPU，是 44s/步 的主要阻塞源。
+    /// F1 材料差对"生成/升级类"效果是足够好的短期代理；长期价值仍由
+    /// 主搜索的 outcome 子树统计学习。
+    /// </summary>
     private LotteryChoice SelectLotteryChoiceByValue(Gamestate state, int outcome,
         List<LotteryChoice> choices)
     {
         LotteryChoice bestChoice = choices[0];
         double bestOpponentValue = double.PositiveInfinity;
-        var candidates = new List<Gamestate>(choices.Count);
-        var valueStates = new List<Gamestate>();
-        var valueIndices = new List<int>();
 
         for (int i = 0; i < choices.Count; i++)
         {
-            LotteryChoice choice = choices[i];
-            Gamestate candidate = state.DeepClone();
-            LotteryResolver.ResolveChoice(candidate, outcome, choice);
+            var candidate = state.DeepClone();
+            LotteryResolver.ResolveChoice(candidate, outcome, choices[i]);
             GameAction.EndTurn(candidate);
-            candidates.Add(candidate);
 
-            if (IsTerminal(candidate))
-                continue;
-
-            valueIndices.Add(i);
-            valueStates.Add(candidate);
-        }
-
-        float[] predictedValues = valueStates.Count == 0
-            ? Array.Empty<float>()
-            : neural.PredictValues(valueStates);
-
-        int valueIndex = 0;
-        for (int i = 0; i < candidates.Count; i++)
-        {
             double opponentValue;
-            if (IsTerminal(candidates[i]))
-                opponentValue = Evaluate(candidates[i]);
+            if (IsTerminal(candidate))
+                opponentValue = Evaluate(candidate);
             else
-            {
-                float predictedValue = predictedValues[valueIndex++];
-                opponentValue = candidates[i].currentTeam == 1
-                    ? predictedValue : -predictedValue;
-            }
+                opponentValue = EvalMaterialHeuristic(candidate);
 
             if (opponentValue < bestOpponentValue)
             {
@@ -655,7 +891,8 @@ public class MctsEngine
                 break;
         }
 
-        return Evaluate(state);
+        // F1：未分胜负时不再返回死平的 0，改用子力差启发式给搜索梯度
+        return EvalMaterialHeuristic(state);
     }
 
     /// <summary>
@@ -678,7 +915,10 @@ public class MctsEngine
             if (piece.type == PieceType.Empty || piece.thisTeam != team || piece.frozenTurns > 0)
                 continue;
 
-            // 随机选一个合法目标（最多尝试 8 次）
+    // 【甲·战术化】随机选一个合法目标（最多尝试 8 次）：
+    // 命中吃子立即优先执行（含吃王 → 真实终局 ±1 信号）；
+    // 安静着法先记住，未命中吃子时才兜底执行。
+            int quietTx = -1, quietTy = -1;
             for (int attempt2 = 0; attempt2 < 8; attempt2++)
             {
                 int tx = rng.Next(xMin, xMax + 1);
@@ -687,9 +927,24 @@ public class MctsEngine
                     continue;
 
                 Piece target = state[tx, ty];
-                piece.Move(tx, ty, state);
-                if (target.type != PieceType.Empty && target.isDead)
-                    state.AddToGraveyard(target);
+                if (target.type != PieceType.Empty)
+                {
+                    // 吃子：立即执行，不与安静着法同权竞争
+                    piece.Move(tx, ty, state);
+                    if (target.isDead)
+                        state.AddToGraveyard(target);
+                    GameAction.EndTurn(state);
+                    return true;
+                }
+                if (quietTx < 0)
+                {
+                    quietTx = tx;
+                    quietTy = ty;
+                }
+            }
+            if (quietTx >= 0)
+            {
+                piece.Move(quietTx, quietTy, state);
                 GameAction.EndTurn(state);
                 return true;
             }
@@ -803,6 +1058,72 @@ public class MctsEngine
         return 0;
     }
 
+    /// <summary>
+    /// 【F1·非终局启发式】按子力价值差给出连续信号，修复纯MCTS“全零价值塌缩”。
+    /// 仅影响 rollout 走满/中断时的兑底估值；终局仍由 Evaluate 精确判定。
+    /// 输出压在 [-w,+w]，真实终局 ±1 永远占主导；权重可由面板参数调节。
+    /// </summary>
+    private double EvalMaterialHeuristic(Gamestate state)
+    {
+        if (evalMaterialWeight <= 0) return 0;
+        double mine = 0, theirs = 0;
+        int cur = state.currentTeam;
+        for (int x = state.leftBound; x <= state.rightBound; x++)
+            for (int y = state.lowerBound; y <= state.upperBound; y++)
+            {
+                Piece p = state[x, y];
+                if (p.type == PieceType.Empty || p.isDead) continue;
+                double v = PieceStrengthPoints(p);
+                if (v <= 0) continue;
+                if (p.thisTeam == cur) mine += v; else theirs += v;
+            }
+        return evalMaterialWeight * Math.Tanh((mine - theirs) / 8.0);
+    }
+
+    /// <summary>
+    /// 棋子强度点数表（F1）——按玩家实战体验排序标定，名称↔等级对照
+    /// 以 RuleEngine.cs 的 GetDescription 为准。
+    /// 将/墙/空格不计入：将死由 Evaluate 判定，墙是临时物。
+    /// </summary>
+    private static double PieceStrengthPoints(Piece p)
+    {
+        switch (p.type)
+        {
+            case PieceType.Rook:
+                return p.upgradeLevel >= 1 ? 16.0 : 8.2;          // 赛车 / 车
+            case PieceType.Cannon:
+                switch (p.upgradeLevel)
+                {
+                    case 1: return 11.0;                           // 炮车
+                    case 2: return 10.5;                           // 迫击炮
+                    case 3: return 15.5;                           // 迫击炮车（炮车+迫击炮叠加）
+                    default: return 6.2;                           // 炮
+                }
+            case PieceType.Knight:
+                return p.upgradeLevel >= 1 ? 6.0 : 4.2;            // 连环马 / 马
+            case PieceType.Bishop:
+                switch (p.upgradeLevel)
+                {
+                    case 1: return 2.8;                            // 巨象
+                    case 2: return 3.1;                            // 小飞象
+                    case 3: return 3.5;                            // 巨飞象
+                    default: return 2.5;                           // 象
+                }
+            case PieceType.Guard:
+                return p.upgradeLevel >= 1 ? 3.4 : 2.1;            // 武士 / 士
+            case PieceType.Pawn:
+                switch (p.upgradeLevel)
+                {
+                    case 1: return 8.8;                            // 狙击兵
+                    case 2: return 3.9;                            // 自爆兵
+                    case 3: return 9.5;                            // 狙击自爆兵
+                    default: return 1.6;                           // 兵
+                }
+            default:
+                return 0.0;
+        }
+    }
+
     public static bool HasKing(Gamestate state, int team)
     {
         for (int x = state.leftBound; x <= state.rightBound; x++)
@@ -898,11 +1219,13 @@ public class MctsEngine
     //  UCB 选择 & 最优行动
     // ================================================================
 
-    /// <summary>PUCT 选择子节点。Scheme A 下 LotteryAction 使用更高的 C。</summary>
-    private MctsNode BestPuctChild(MctsNode node)
+    /// <summary>PUCT 选择子节点。Scheme A 下 LotteryAction 使用更高的 C。
+    /// F2：完全平手时随机破序，消除动作枚举顺序导致的结构性饿死
+    /// （抽奖是枚举末位，在零值世界里会被系统性跳过）。</summary>
+    private MctsNode BestPuctChild(MctsNode node, System.Random rng)
     {
-        MctsNode best = null;
         double bestVal = double.NegativeInfinity;
+        var tied = new List<MctsNode>();
 
         foreach (MctsNode child in node.children)
         {
@@ -912,14 +1235,22 @@ public class MctsEngine
                 ? explorationConstant * lotteryCMultiplier
                 : explorationConstant;
             double v = child.PuctValue(c, node.visitCount);
-            if (v > bestVal)
-            {
-                bestVal = v;
-                best = child;
-            }
+            if (v > bestVal) bestVal = v;
         }
 
-        return best;
+        foreach (MctsNode child in node.children)
+        {
+            if (child.pruned) continue;
+
+            double c = (child.action is LotteryAction)
+                ? explorationConstant * lotteryCMultiplier
+                : explorationConstant;
+            double v = child.PuctValue(c, node.visitCount);
+            if (v >= bestVal - 1e-9)
+                tied.Add(child);
+        }
+
+        return tied.Count == 0 ? null : tied[rng.Next(tied.Count)];
     }
 
     private GameAction BestChild(MctsNode root)

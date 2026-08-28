@@ -17,6 +17,12 @@ public class MctsNode
     public bool pruned;          // 被重复检测标记为非法（PUCT 不再选择此节点）
     public Dictionary<string, double> priorByAction; // 叶节点缓存的所有合法动作先验（actionKey→prob）
 
+    // ── ChanceNode 固化选择 ──
+    // 仅 outcome 子节点使用：该 outcome 首次创建时实际执行的 LotteryChoice。
+    // 重放时必须执行完全相同的 choice，保证子树状态一致性
+    // （null = 无可选目标的自动效果路径）
+    public LotteryChoice fixedChoice;
+
     // ── Scheme B: Chance Node 支持 ──
     public bool IsChanceNode;                  // 此节点是否代表随机事件（抽奖）
     public Dictionary<int, MctsNode> outcomeChildren; // outcome → child (lazy)

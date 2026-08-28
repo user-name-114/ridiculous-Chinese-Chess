@@ -1,4 +1,6 @@
 using System;
+using System.IO;
+using System.Threading;
 using System.Collections.Generic;
 
 // ====================================================================
@@ -33,7 +35,7 @@ public static class MatchRunner
     /// <summary>AI vs AI 完整对局。prepareMode=true 时双方开局各抽 5 次奖。</summary>
     public static MatchResult Run(Gamestate initialState,
         AIPlayer red, AIPlayer black, int maxMoves = 300, bool recordSteps = true,
-        bool prepareMode = false, int repetitionLoser = 0)
+        bool prepareMode = false, int repetitionLoser = 0, string pauseFlag = null)
     {
         Gamestate state = initialState.DeepClone();
         var steps = recordSteps ? new List<MatchStep>() : null;
@@ -74,6 +76,8 @@ public static class MatchRunner
 
         for (int moveCount = 0; moveCount < maxMoves; moveCount++)
         {
+            while (pauseFlag != null && File.Exists(pauseFlag))
+                Thread.Sleep(300);
             int team = state.currentTeam;
 
             // 终局检查

@@ -26,17 +26,24 @@ public class AIPlayer
         bool allowLottery = true, int aiTeam = 0,
         double lotteryCMultiplier = 1.0, bool useLotteryChanceNodes = true,
         int threadCount = 16, NeuralMcts neural = null,
-        double dirichletAlpha = 0, double dirichletEpsilon = 0)
+        double dirichletAlpha = 0, double dirichletEpsilon = 0,
+        double evalMaterialWeight = 0.15,
+        double virtualLossValue = 0.5,
+        int lotteryEvalLimit = 16,
+        int maxRolloutDepth = 200)
     {
         Simulations = simulations;
         AllowLottery = allowLottery;
         this.aiTeam = aiTeam;
-        engine = new MctsEngine(simulations, C, maxRolloutDepth: 200,
+        engine = new MctsEngine(simulations, C, maxRolloutDepth: maxRolloutDepth,
             allowLottery: allowLottery, aiTeam: aiTeam,
             lotteryCMultiplier: lotteryCMultiplier,
             useLotteryChanceNodes: useLotteryChanceNodes,
             threadCount: threadCount, neural: neural,
-            dirichletAlpha: dirichletAlpha, dirichletEpsilon: dirichletEpsilon);
+            dirichletAlpha: dirichletAlpha, dirichletEpsilon: dirichletEpsilon,
+            evalMaterialWeight: evalMaterialWeight,
+            virtualLossValue: virtualLossValue,
+            lotteryEvalLimit: lotteryEvalLimit);
         rng = seed.HasValue ? new System.Random(seed.Value) : new System.Random();
     }
 
@@ -63,6 +70,14 @@ public class AIPlayer
         Gamestate state, RepetitionTracker history)
     {
         return engine.GetActionDistribution(state, rng, history);
+    }
+
+    /// <summary>【诊断专用】根节点每个子动作的统计（含被剪枝项）</summary>
+    public List<(GameAction action, string desc, bool isChance,
+                 double prior, int visits, double q, bool pruned)> GetRootChildStats(
+        Gamestate state, RepetitionTracker history)
+    {
+        return engine.GetRootChildStats(state, rng, history);
     }
 
     public void ExecuteAction(Gamestate state, GameAction action)
