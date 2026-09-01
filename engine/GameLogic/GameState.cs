@@ -122,6 +122,8 @@ public class Gamestate
         clone.currentTeam = this.currentTeam;
         clone.prepareModeOn = this.prepareModeOn;
         clone.prepareLotteryCount = this.prepareLotteryCount;
+        clone.lianHuanMaTeam = this.lianHuanMaTeam;   // 修复：连环马跳斩目标归属（DeepClone 此前丢失，搜索克隆体内连环马走法不可见）
+        clone.lianHuanMaTargets = new List<(int x, int y)>(this.lianHuanMaTargets);   // 修复(补)：目标列表本体也要复制
 
         // 用正确的边界重建 board 数组
         Piece[,] newBoard = new Piece[clone.rightBound - clone.leftBound + 1, clone.upperBound - clone.lowerBound + 1];
