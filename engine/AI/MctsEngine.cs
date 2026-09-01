@@ -114,6 +114,11 @@ public class MctsEngine
     private double dirichletAlpha;    // Dirichlet 噪声浓度（>0 时根节点加噪声，鼓励探索）
     private double dirichletEpsilon;  // 噪声混合比例
 
+    // ── 诊断计数器（静态，跨引擎实例共享；ResetStats 后按次读取差值）──
+    internal static long StatRollouts, StatRolloutTerm, StatSweeps, StatSweepCand, StatChanceSel, StatNewPairs;
+    internal static long StatPhaseCloneDescend, StatPhaseNN, StatPhaseRoll, StatPhaseExpandBack;
+    internal static void ResetStats() { StatRollouts = StatRolloutTerm = StatSweeps = StatSweepCand = StatChanceSel = StatNewPairs = 0; }
+
     private double evalMaterialWeight;
     private int lotteryEvalLimit;
 
@@ -272,13 +277,23 @@ public class MctsEngine
 
         int per = maxSimulations / threads;
         int rem = maxSimulations % threads;
-        System.Threading.Tasks.Parallel.For(0, threads, w =>
+        // 专用线程而非 ThreadPool：避免嵌套并行下的线程注入延迟，
+        // 确保 K 个 worker 真正同时进入 NN 等待（提高批量密度与 GPU 占用）。
+        // virtual loss 补偿机制保证统计口径与串行一致，不影响棋力。
+        var handles = new System.Threading.Thread[threads];
+        for (int w = 0; w < threads; w++)
         {
-            int mySims = per + (w < rem ? 1 : 0);
-            var wr = new System.Random(seeds[w]);
-            for (int s = 0; s < mySims; s++)
-                WorkerSim(root, state, history, wr);
-        });
+            int wid = w;
+            handles[w] = new System.Threading.Thread(() =>
+            {
+                int mySims = per + (wid < rem ? 1 : 0);
+                var wr = new System.Random(seeds[wid]);
+                for (int s = 0; s < mySims; s++)
+                    WorkerSim(root, state, history, wr);
+            });
+            handles[w].Start();
+        }
+        foreach (var h in handles) h.Join();
         return root;
     }
 
@@ -292,7 +307,8 @@ public class MctsEngine
         var prunedThisSim = new List<MctsNode>();
         try
         {
-            var ws = rootState.DeepClone();              // 线程私有工作副本
+            var __ph = System.Diagnostics.Stopwatch.StartNew();
+var ws = rootState.DeepClone();              // 线程私有工作副本
             var trk = history?.Clone() ?? new RepetitionTracker();
             var node = root;
             var path = new List<MctsNode>(64);           // 本 sim 经过的已扣 VL 边
@@ -371,6 +387,7 @@ public class MctsEngine
                             if (child == null) { exhausted = true; break; }
                             if (child.IsChanceNode)
                             {
+                                StatChanceSel++;
                                 child.visitCount++;
                                 child.totalValue -= virtualLossValue;
                                 path.Add(child);
@@ -414,35 +431,49 @@ public class MctsEngine
                 _ = nextNode;                              // node 已在锁内前移
             }
 
+            System.Threading.Interlocked.Add(ref StatPhaseCloneDescend, (long)__ph.Elapsed.TotalMilliseconds);
+            __ph.Restart();
             // ── 叶评估（全部在锁外）──
+            var expandState = ws.DeepClone();   // 修复：叶子原局面快照（同 RunMctsSingle）
             double result;
             float[] priors = null;
             if (IsTerminal(ws))
                 result = Evaluate(ws);
             else if (neural != null)
             {
+                var __nn = System.Diagnostics.Stopwatch.StartNew();
                 var (pol, vNet) = neural.PredictBlocking(ws);
+                __nn.Stop();
+                System.Threading.Interlocked.Add(ref StatPhaseNN, (long)__nn.Elapsed.TotalMilliseconds);
                 priors = pol;
                 result = ws.currentTeam == -1 ? -vNet : vNet;
             }
             else
+            {
+                var __rl = System.Diagnostics.Stopwatch.StartNew();
                 result = Simulate(ws, wr);
+                __rl.Stop();
+                System.Threading.Interlocked.Add(ref StatPhaseRoll, (long)__rl.Elapsed.TotalMilliseconds);
+            }
 
             // 展开（若刚才到达的是未展开叶；存在竞态时幂等跳过）
-            if (!IsTerminal(ws) && leafFound != null && leafFound.children.Count == 0)
+            if (!IsTerminal(expandState) && leafFound != null && leafFound.children.Count == 0)
             {
                 lock (_treeLock)
                 {
-                    if (leafFound.children.Count == 0 && !IsTerminal(ws))
+                    if (leafFound.children.Count == 0 && !IsTerminal(expandState))
                     {
-                        ExpandAll(leafFound, ws, priors);
+                        ExpandAll(leafFound, expandState, priors);
                         if (leafFound == root && dirichletAlpha > 0 && dirichletEpsilon > 0)
                             AddDirichletNoise(root, wr);
                     }
                 }
             }
 
+            var __eb = System.Diagnostics.Stopwatch.StartNew();
             BackpropAggregate(path, leafFound, result, root);
+            __eb.Stop();
+            System.Threading.Interlocked.Add(ref StatPhaseExpandBack, (long)__eb.Elapsed.TotalMilliseconds);
         }
         finally
         {
@@ -529,6 +560,7 @@ public class MctsEngine
                 continue;
 
             validSims++;
+            Gamestate expandState = workState.DeepClone();   // 修复：叶子原局面快照——Simulate 会随机走子污染 workState，展开必须用快照
 
             double result;
             float[] priors = null;
@@ -552,9 +584,9 @@ public class MctsEngine
             { throw new Exception($"Simulate failed at sim {validSims}: {ex.Message}", ex); }
 
             // 展开叶节点（策略网络先验或均匀先验）；ChanceNode 不在此展开（由 HandleChanceNode 管理）
-            if (!IsTerminal(workState) && leaf.children.Count == 0 && !leaf.IsChanceNode)
+            if (!IsTerminal(expandState) && leaf.children.Count == 0 && !leaf.IsChanceNode)
             {
-                ExpandAll(leaf, workState, priors);
+                ExpandAll(leaf, expandState, priors);
                 // 根节点加 Dirichlet 噪声（AlphaZero 探索，仅自对弈时 dirichletAlpha>0）
                 if (leaf == root && dirichletAlpha > 0 && dirichletEpsilon > 0)
                     AddDirichletNoise(root, rng);
@@ -739,6 +771,8 @@ public class MctsEngine
     private LotteryChoice SelectLotteryChoiceByValue(Gamestate state, int outcome,
         List<LotteryChoice> choices)
     {
+        StatSweeps++;
+        StatSweepCand += choices.Count;
         LotteryChoice bestChoice = choices[0];
         double bestOpponentValue = double.PositiveInfinity;
 
@@ -881,10 +915,14 @@ public class MctsEngine
 
     private double Simulate(Gamestate state, System.Random rng)
     {
+        StatRollouts++;
         for (int depth = 0; depth < maxRolloutDepth; depth++)
         {
             if (IsTerminal(state))
+            {
+                StatRolloutTerm++;
                 return Evaluate(state);
+            }
 
             // 轻量随机走子（不创建 GameAction 对象，避免 GC 压力）
             if (!LightRandomMove(state, rng))
