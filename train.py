@@ -59,18 +59,19 @@ def load_config(path="config.json"):
 
 
 def load_data(data_dir):
-    """加载 .bin 数据。返回 boards, graveyards, policies, values。
-
-    用 np.frombuffer 偏移量游走解析，避免对每个样本调上千次 struct.unpack
-    （每个棋盘 13552 字节逐 float 解包非常慢，是续训加载的主要瓶颈）。
-    """
+    """读取 .bin 数据，并按文件（=按局）划分训练集与验证集（每20局划1局）。"""
     bin_files = sorted(glob.glob(os.path.join(data_dir, "*.bin")))
     if not bin_files:
         print(f"[错误] {data_dir} 下没有 .bin 数据文件")
         return None
 
-    all_boards, all_graves, all_policies, all_values = [], [], [], []
-    for fp in bin_files:
+    tr_b, tr_g, tr_v = [], [], []
+    tr_pol = []
+    va_b, va_g, va_v = [], [], []
+    va_pol = []
+    val_every = 20
+
+    for file_idx, fp in enumerate(bin_files):
         with open(fp, "rb") as f:
             raw = f.read()
         num_samples, board_size, grave_size = struct.unpack_from("iii", raw, 0)
@@ -101,17 +102,28 @@ def load_data(data_dir):
             off += 4
             pol_pairs[i] = (idx.astype(np.int64, copy=False), prob.copy())
 
-        all_boards.append(boards)
-        all_graves.append(graves)
-        all_values.append(values)
-        all_policies.extend(pol_pairs)
+        if file_idx % val_every == 0:
+            va_b.append(boards); va_g.append(graves); va_v.append(values)
+            va_pol.extend(pol_pairs)
+        else:
+            tr_b.append(boards); tr_g.append(graves); tr_v.append(values)
+            tr_pol.extend(pol_pairs)
 
-    boards = np.concatenate(all_boards, axis=0)
-    boards = boards.reshape(-1, INPUT_CH, BOARD_H, BOARD_W)  # (N, 22, 14, 11)
-    graveyards = np.concatenate(all_graves, axis=0)
-    values = np.concatenate(all_values, axis=0)
-    print(f"加载 {len(boards)} 个样本（来自 {len(bin_files)} 个文件）")
-    return boards, graveyards, all_policies, values
+    boards = np.concatenate(tr_b, axis=0).reshape(-1, INPUT_CH, BOARD_H, BOARD_W)
+    graveyards = np.concatenate(tr_g, axis=0)
+    values = np.concatenate(tr_v, axis=0)
+    print(f"加载 {len(boards)} 个训练样本 + {sum(len(v) for v in va_v)} 个验证样本"
+          f"（来自 {len(bin_files)} 个文件）")
+    if va_b:
+        v_boards = np.concatenate(va_b, axis=0).reshape(-1, INPUT_CH, BOARD_H, BOARD_W)
+        v_graveyards = np.concatenate(va_g, axis=0)
+        v_values = np.concatenate(va_v, axis=0)
+    else:
+        v_boards = np.empty((0, INPUT_CH, BOARD_H, BOARD_W), dtype=np.float32)
+        v_graveyards = np.empty((0, 18), dtype=np.float32)
+        v_values = np.empty((0,), dtype=np.float32)
+    return boards, graveyards, tr_pol, values, v_boards, v_graveyards, va_pol, v_values
+
 
 
 def sparse_cross_entropy(logits, indices_list, probs_list):
@@ -198,10 +210,13 @@ def train(config, data, checkpoint_dir, resume_from=None, net_name="latest"):
                       f"(记录 {saved_cfg['network'][key]} vs 当前 {net_cfg[key]})")
                 sys.exit(1)
 
-    boards, graveyards, policies, values = data
+    boards, graveyards, policies, values, v_boards, v_graves, v_pols, v_vals = data
     boards_t = torch.from_numpy(boards).to(device)
     graves_t = torch.from_numpy(graveyards).to(device)
     values_t = torch.from_numpy(values).float().to(device)
+    v_boards_t = torch.from_numpy(v_boards).to(device)
+    v_graves_t = torch.from_numpy(v_graves).to(device)
+    v_vals_t = torch.from_numpy(v_vals).float().to(device)
     # policies 是 list of (np indices, np probs)，转成 GPU tensor
     pol_idx = [torch.from_numpy(p[0]).long().to(device) for p in policies]
     pol_prob = [torch.from_numpy(p[1]).float().to(device) for p in policies]
@@ -261,8 +276,32 @@ def train(config, data, checkpoint_dir, resume_from=None, net_name="latest"):
         scaler.update()
 
         if step % 50 == 0:
+            with torch.no_grad():
+                _es = sum(float(-(t * t.clamp_min(1e-12).log()).sum()) for t in b_prob)
+                tgt_ent = _es / len(b_prob)
             print(f"step {step}/{num_steps}  loss={loss.item():.4f}  "
-                  f"policy={policy_loss.item():.4f}  value={value_loss.item():.4f}")
+                  f"policy={policy_loss.item():.4f}（目标熵{tgt_ent:.4f}）  value={value_loss.item():.4f}")
+
+        # 验证集评估（每 interval 步一次，纯前向，按局划分）
+        if step > 0 and step % interval == 0 and v_boards.shape[0] > 0:
+            model.eval()
+            vps = vvs_ = 0.0
+            vn = 0
+            with torch.no_grad(), torch.autocast(device_type="cuda", enabled=use_amp):
+                for vstart in range(0, v_boards.shape[0], 256):
+                    vslice = v_pols[vstart:vstart + 256]
+                    vx = torch.from_numpy(v_boards[vstart:vstart + 256]).to(device)
+                    vg = torch.from_numpy(v_graves[vstart:vstart + 256]).to(device)
+                    vy = torch.from_numpy(v_vals[vstart:vstart + 256]).to(device)
+                    vpol, vval = model(vx, vg)
+                    vval = vval.squeeze(1)
+                    vps += sparse_cross_entropy(vpol,
+                                                [torch.from_numpy(t[0]).to(device) for t in vslice],
+                                                [torch.from_numpy(t[1]).to(device) for t in vslice]).item()
+                    vvs_ += F.mse_loss(vval.float(), vy).item()
+                    vn += 1
+            model.train()
+            print(f"[验证] step {step + 1}: policy={vps / max(1, vn):.4f} value={vvs_ / max(1, vn):.4f}", flush=True)
         if step > 0 and step % interval == 0:
             save_checkpoint(os.path.join(checkpoint_dir, f"{net_name}.pt"),
                             model, optimizer, step, config)
@@ -279,10 +318,11 @@ def main():
     resume_from = sys.argv[3] if len(sys.argv) > 3 else None
     net_name = sys.argv[4] if len(sys.argv) > 4 else "latest"
 
-    data = load_data(data_dir)
-    if data is None:
+    boards, graves, pols, vals, v_boards, v_graves, v_pols, v_vals = load_data(data_dir)
+    if boards is None:
         return
-    train(config, data, checkpoint_dir, resume_from, net_name)
+    train(config, (boards, graves, pols, vals, v_boards, v_graves, v_pols, v_vals),
+          checkpoint_dir, resume_from, net_name)
 
 
 if __name__ == "__main__":

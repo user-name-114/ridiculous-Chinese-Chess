@@ -4,6 +4,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import json
 import os
+import sys
 import subprocess
 import time
 import datetime
@@ -17,12 +18,17 @@ CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 RESULTS_DIR = os.path.join(BASE_DIR, "results")
 COLLECTOR_DLL = os.path.join(BASE_DIR, "collector", "bin", "Release",
                             "net10.0", "SelfPlayCollector.dll")
+RANDOM_INIT_PY = os.path.join(BASE_DIR, "random_init_net.py")
+
+
 DOTNET = r"C:\Program Files\dotnet\dotnet.exe"
 PYTHON_EXE = r"C:\Users\Lenovo\anaconda3\python.exe"
 TRAIN_PY = os.path.join(BASE_DIR, "train.py")
 EXPORT_ONNX_PY = os.path.join(BASE_DIR, "export_onnx.py")
 MATCH_RESULTS_DIR = os.path.join(os.path.dirname(BASE_DIR), "match_results")  # 对战结果存 training 之外
 PLOT_MATCH_PY = os.path.join(BASE_DIR, "plot_match.py")
+
+
 FONT = ("Microsoft YaHei", 10)
 FONT_TITLE = ("Microsoft YaHei", 14, "bold")
 
@@ -36,18 +42,18 @@ PARAM_INFO = {
     "training.num_train_steps": ("训练步数", "每一代训练多少步，步数越多学得越充分（也更慢）", False),
     "training.checkpoint_interval": ("存档间隔", "每隔多少步保存一次模型存档，中断后可恢复", False),
     "training.value_loss_weight": ("价值损失权重", "价值头损失占总损失的比重，越大越重视胜负判断", False),
-    "mcts.lottery_eval_limit": ("抽奖候选评估上限", "搜索内每个抽奖结果最多用NN评估多少个候选效果（升级/生成/复活类枚举可达数百上千，全量评估会造成评估风暴）。推荐8~32；越大越精确越慢", False),
-    "mcts.virtual_loss": ("虚拟损失", "并行选路时先扣的临时失败分，用于并发互相避让。需大于真实回报尺度(终局正负1)；过大会抑制探索(抽奖易饿死)、过小避让不足。推荐范围0.3~1.0，当前默认0.5", False),
-    "mcts.num_mcts_sims": ("MCTS 模拟次数", "自对弈每步模拟多少次；实测本机在当前规则下单局极快，常用范围150~300；越大棋力基线越强但单局耗时线性增长", False),
-    "mcts.eval_material_weight": ("评估子力权重", "纯MCTS的rollout未分胜负时按子力差给连续估值(压在±权重内)，修复全零价值塌缩导致的长局闷和与抽奖饿死。推荐0.1~0.2；设0=恢复旧行为", False),
+        "mcts.lottery_eval_limit": ("抽奖候选评估上限", "搜索内每个新抽奖结果最多评估多少个候选效果（用子力启发式而非NN，避免评估风暴；升级/生成/复活类枚举可达数百上千）。推荐8~32", False),
+        "mcts.virtual_loss": ("虚拟损失", "树内并行K个worker选路时先扣的临时失败分，用于互相避让。需大于真实回报尺度(终局±1)；过大会抑制探索(抽奖饿死)、过小避让不足。推荐0.3~1.0，当前0.5", False),
+        "mcts.num_mcts_sims": ("MCTS 模拟次数", "自对弈与对战共用的每步模拟数（对战双方相同才公平，已统一由此参数控制）。常用150~300；越大越强但越慢", False),
+        "mcts.eval_material_weight": ("评估子力权重", "两处用途：①纯MCTS的rollout未分胜负时按子力差给连续估值；②抽奖候选效果选择时的静态评估。输出压在±权重内。推荐0.1~0.2；设0=关闭", False),
     "mcts.cpuct": ("探索常数", "越大越爱尝试新走法（探索），越小越走当前最优（利用）", False),
     "mcts.temperature": ("温度", "走子随机程度：越高越随机，1=按概率采样，0=总选概率最高", False),
     "mcts.temp_threshold": ("温度阈值", "前多少步用温度随机采样，之后贪心选最优", False),
     "selfplay.dirichlet_alpha": ("Dirichlet α", "开局探索噪声强度，越大越鼓励尝试新走法", False),
     "selfplay.dirichlet_epsilon": ("Dirichlet ε", "噪声占先验概率的比例（0~1），越大越随机", False),
     "selfplay.max_moves": ("最大步数", "单局最大步数，超时判和", False),
-    "selfplay.parallel_games": ("并行局数", "同时自对弈几局；与每局线程相乘≈总线程数。实测本机(i9-13900HX)：纯MCTS模式24并行仅用约7%CPU，可大胆调大；神经模式下两者相乘≈逻辑核数(32)即可", False),
-    "selfplay.mcts_threads": ("每局MCTS线程", "每局内部并行根并行分支数；神经网络模式下自动扁平化为 N×1 共享批量推理队列，此参数仅决定总局数倍率", False),
+        "selfplay.parallel_games": ("并行局数", "同时自对弈局数。神经模式下 局数×树内K≈在飞NN请求数，越大GPU批量越满；本机推荐24~48", False),
+        "selfplay.mcts_threads": ("每局MCTS线程(树内并行K)", "每局搜索树内的并行worker数（虚拟损失共享树）。神经模式下NN请求密度×K；实测24局×4=96 worker可用。推荐2~8", False),
     "selfplay.neural_batch_size": ("神经网络批量大小", "GPU一次推理处理多少个局面。实测8GB显存训练batch128仅占1.1GB，批量推理侧很富余；推荐范围32~64，并发局多时可试128", False),
     "selfplay.neural_batch_timeout_ms": ("批量超时(ms)", "攒批最长等待毫秒数。低并发场景(对战≤8局、请求稀疏)推荐10~15让批次更满；高并发自对弈(24局+)用默认2~5延迟更低", False),
     "selfplay.match_parallel_games": ("对战并行局数", "同时进行多少局对战。每局同时只有一方在搜索(线程数=mcts_threads)，本机实测16局≈32线程可跑满；调大加快评测、调小减少CPU争抢", False),
@@ -204,7 +210,7 @@ class Panel:
     def build_train_ui(self):
         f = self.train_frame
         f.columnconfigure(0, weight=1)
-        f.rowconfigure(6, weight=1)
+        f.rowconfigure(7, weight=1)
 
         # 状态栏（白底无边框）
         self.status_label = tk.Label(f, text="训练未开始", font=FONT_TITLE,
@@ -259,13 +265,26 @@ class Panel:
 
         # 进度条1：数据收集（按局数）
         p1 = tk.Frame(f)
-        p1.grid(row=3, column=0, columnspan=2, sticky="we", padx=10, pady=(15, 2))
+        # 随机初始化网络（AlphaZero 式冷启动基线）：按钮 + 种子输入
+        initrow = tk.Frame(f)
+        initrow.grid(row=3, column=0, columnspan=2, sticky="we", padx=10, pady=(8, 2))
+        self.init_btn = tk.Button(initrow, text="随机初始化网络", width=14, font=FONT,
+                                  command=self.on_random_init, bg="#188038", fg="white")
+        self.init_btn.pack(side="left", padx=5)
+        tk.Label(initrow, text="输入种子：", font=FONT).pack(side="left", padx=(10, 2))
+        self.init_seed_var = tk.StringVar()
+        self.init_seed_entry = tk.Entry(initrow, textvariable=self.init_seed_var,
+                                        width=12, font=FONT, justify="right")
+        self.init_seed_entry.pack(side="left")
+        tk.Label(initrow, text="（留空=系统随机；网络名用上方输入框）",
+                 font=FONT, fg="#666").pack(side="left", padx=4)
+        p1.grid(row=4, column=0, columnspan=2, sticky="we", padx=10, pady=(15, 2))
         tk.Label(p1, text="数据收集", font=FONT, width=8).pack(side="left")
         self.progress = ProgressBar(p1)
 
         # 进度条2：网络训练（按步数）
         p2 = tk.Frame(f)
-        p2.grid(row=4, column=0, columnspan=2, sticky="we", padx=10, pady=2)
+        p2.grid(row=5, column=0, columnspan=2, sticky="we", padx=10, pady=2)
         tk.Label(p2, text="网络训练", font=FONT, width=8).pack(side="left")
         self.train_progress = ProgressBar(p2)
 
@@ -275,7 +294,7 @@ class Panel:
                         troughcolor="#e0e0e0")
         perf = tk.LabelFrame(f, text=" 性能监测 ", font=FONT, padx=6, pady=4,
                              bg="white")
-        perf.grid(row=5, column=0, columnspan=2, sticky="we", padx=10, pady=5)
+        perf.grid(row=6, column=0, columnspan=2, sticky="we", padx=10, pady=5)
         perf.columnconfigure(1, weight=1)
 
         self.perf_bars = {}
@@ -293,7 +312,7 @@ class Panel:
 
         # 信息栏（黑框白底，可滚动，最多 100 条）
         info_frame = tk.Frame(f, relief="solid", bd=1, bg="white")
-        info_frame.grid(row=6, column=0, columnspan=2, sticky="nsew",
+        info_frame.grid(row=7, column=0, columnspan=2, sticky="nsew",
                         padx=10, pady=(5, 10))
         self.info_text = tk.Text(info_frame, height=8, bg="white", fg="black",
                                  font=FONT, wrap="word", state="disabled")
@@ -792,6 +811,54 @@ class Panel:
         else:
             self.log(f"开始第 {self.generation} 代训练，目标 {self.target_games} 局（纯 MCTS 自对弈）")
         self.update_buttons()
+
+    def on_random_init(self):
+        r"""生成随机初始化网络（AlphaZero 式冷启动）：自定义名称输出到 results/<时间戳>_init/。"""
+        seed_txt = self.init_seed_var.get().strip()
+        if seed_txt:
+            try:
+                seed = int(seed_txt)
+            except ValueError:
+                messagebox.showerror("错误", "初始化种子必须是整数")
+                return
+        else:
+            seed = int(time.time() * 1000) % (2 ** 31)
+            self.init_seed_var.set(str(seed))
+        net_name = self.normalize_network_name(self.net_name_var.get())
+        if not net_name:
+            messagebox.showerror("错误", "请先填写网络名称")
+            return
+        out_dir = os.path.join(RESULTS_DIR, f"{datetime.datetime.now():%Y%m%d-%H%M%S}_init")
+        os.makedirs(out_dir, exist_ok=True)
+        self.set_status("随机初始化网络中…", "#188038")
+        self.log(f"随机初始化网络：种子={seed} 网络名={net_name} 输出={out_dir}")
+        self.init_btn.config(state="disabled")
+
+        def worker():
+            try:
+                no_window = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
+                pr = subprocess.run([PYTHON_EXE, RANDOM_INIT_PY, str(seed), out_dir, net_name],
+                                    cwd=BASE_DIR, capture_output=True, text=True,
+                                    encoding="utf-8", errors="replace", timeout=300,
+                                    creationflags=no_window)
+                out = (pr.stdout or "")
+                if pr.returncode != 0 and pr.stderr:
+                    out += "\n" + pr.stderr
+                for line in out.splitlines():
+                    self.after(0, lambda l=line: self.log(l))
+                ok = pr.returncode == 0 and os.path.exists(os.path.join(out_dir, net_name + ".onnx"))
+                def done():
+                    self.log("随机初始化完成，.pt/.onnx/init_info.txt 已输出" if ok
+                             else "随机初始化失败，详见上方输出")
+                    self.set_status("随机初始化完成" if ok else "随机初始化失败",
+                                    "#188038" if ok else "#c5221f")
+                self.after(0, done)
+            except Exception as e:
+                self.after(0, lambda: self.log(f"随机初始化异常: {e}"))
+            finally:
+                self.after(0, lambda: self.init_btn.config(state="normal"))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def on_pause(self):
         if self.state == "training":
