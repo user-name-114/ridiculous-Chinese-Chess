@@ -1,6 +1,6 @@
 using System.Collections.Generic;
 
-//纯数据文件，不含unity相关内容
+//纯数据文件，不含unity相关内容，仅包含部分全局效果，其余效果见其他代码。
 public static class LotteryEffects
 {
     public static void Reverse(Gamestate state)
