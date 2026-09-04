@@ -52,11 +52,11 @@ PARAM_INFO = {
     "selfplay.dirichlet_alpha": ("Dirichlet α", "开局探索噪声强度，越大越鼓励尝试新走法", False),
     "selfplay.dirichlet_epsilon": ("Dirichlet ε", "噪声占先验概率的比例（0~1），越大越随机", False),
     "selfplay.max_moves": ("最大步数", "单局最大步数，超时判和", False),
-        "selfplay.parallel_games": ("并行局数", "同时自对弈局数。神经模式下 局数×树内K≈在飞NN请求数，越大GPU批量越满；本机推荐24~48", False),
-        "selfplay.mcts_threads": ("每局MCTS线程(树内并行K)", "每局搜索树内的并行worker数（虚拟损失共享树）。神经模式下NN请求密度×K；实测24局×4=96 worker可用。推荐2~8", False),
+        "selfplay.parallel_games": ("并行局数", "同时自对弈局数。与每局MCTS线程相乘≈总线程数，等于/略低于CPU逻辑核数最快——超订反而下降（实测144线程比32线程慢一倍以上）。2026-09-04 实测：pg4×t8 全局1217 sims/s，约为24×6的2~3倍。32逻辑核推荐 4~8", False),
+        "selfplay.mcts_threads": ("每局MCTS线程(树内并行K)", "每局搜索树内的并行worker数（虚拟损失共享树）。NN请求密度×K，是吞吐主杠杆：单局实测 tc=1→8→16 = 81→515→600 sims/s。请求越密批越大GPU效率越高；推荐 8~16，并与 parallel_games 相乘≈逻辑核数", False),
     "selfplay.neural_batch_size": ("神经网络批量大小", "GPU一次推理处理多少个局面。实测8GB显存训练batch128仅占1.1GB，批量推理侧很富余；推荐范围32~64，并发局多时可试128", False),
-    "selfplay.neural_batch_timeout_ms": ("批量超时(ms)", "攒批最长等待毫秒数。低并发场景(对战≤8局、请求稀疏)推荐10~15让批次更满；高并发自对弈(24局+)用默认2~5延迟更低", False),
-    "selfplay.match_parallel_games": ("对战并行局数", "同时进行多少局对战。每局同时只有一方在搜索(线程数=mcts_threads)，本机实测16局≈32线程可跑满；调大加快评测、调小减少CPU争抢", False),
+    "selfplay.neural_batch_timeout_ms": ("批量超时(ms)", "攒批最长等待毫秒数。2026-09-04 实测：自对弈 1ms 比 3ms 慢（批更小、GPU调用更频），3ms 已验证合理勿调小；低并发对战(请求稀疏)可试 10~15 让批次更满（该项未实测）", False),
+    "selfplay.match_parallel_games": ("对战并行局数", "同时进行多少局对战。每局同时只有一方在搜索(线程数=mcts_threads)，总线程=局数×mcts_threads；mcts_threads=8 时 32 逻辑核推荐 2~4 局（16 局=128 线程会超订降速）；调大加快评测、调小减少CPU争抢", False),
     "training.use_amp": ("混合精度(fp16)", "训练用AMP：卷积等重算子在fp16加速，BN/softmax自动保持fp32，GradScaler防下溢。实测提速约1.5~2倍；若遇NaN先关此项排查", False),
 }
 
