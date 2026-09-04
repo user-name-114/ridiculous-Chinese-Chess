@@ -70,6 +70,12 @@ def main():
         f.write(f"时间: {datetime.datetime.now()}\n")
         f.write("用途: 可直接用于\"网络指导自对弈\"或作为对照基线\n")
     log("[随机初始化] init_info.txt 已写入（种子与参数）")
+    snap = {"训练结束时间": str(datetime.datetime.now()), "状态": "随机初始化",
+            "训练局数": 0, "超参数": full}
+    with open(os.path.join(out_dir, "config_snapshot.json"), "w", encoding="utf-8") as f:
+        json.dump(snap, f, ensure_ascii=False, indent=1)
+    log("[随机初始化] config_snapshot.json 已写入（可用\"打开…\"导入续训练）")
+
     return 0
 
 if __name__ == "__main__":

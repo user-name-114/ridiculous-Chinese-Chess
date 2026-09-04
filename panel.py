@@ -830,35 +830,31 @@ class Panel:
             return
         out_dir = os.path.join(RESULTS_DIR, f"{datetime.datetime.now():%Y%m%d-%H%M%S}_init")
         os.makedirs(out_dir, exist_ok=True)
+        log_file = os.path.join(out_dir, "init_run_log.txt")
+        self.elapsed = 0.0
+        self._timer_start = time.time()
+        self._running = True
         self.set_status("随机初始化网络中…", "#188038")
         self.log(f"随机初始化网络：种子={seed} 网络名={net_name} 输出={out_dir}")
         self.init_btn.config(state="disabled")
-
-        def worker():
-            try:
-                no_window = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
-                pr = subprocess.run([PYTHON_EXE, RANDOM_INIT_PY, str(seed), out_dir, net_name],
-                                    cwd=BASE_DIR, capture_output=True, text=True,
-                                    encoding="utf-8", errors="replace", timeout=300,
-                                    creationflags=no_window)
-                out = (pr.stdout or "")
-                if pr.returncode != 0 and pr.stderr:
-                    out += "\n" + pr.stderr
-                for line in out.splitlines():
-                    self.after(0, lambda l=line: self.log(l))
-                ok = pr.returncode == 0 and os.path.exists(os.path.join(out_dir, net_name + ".onnx"))
-                def done():
-                    self.log("随机初始化完成，.pt/.onnx/init_info.txt 已输出" if ok
-                             else "随机初始化失败，详见上方输出")
-                    self.set_status("随机初始化完成" if ok else "随机初始化失败",
-                                    "#188038" if ok else "#c5221f")
-                self.after(0, done)
-            except Exception as e:
-                self.after(0, lambda: self.log(f"随机初始化异常: {e}"))
-            finally:
-                self.after(0, lambda: self.init_btn.config(state="normal"))
-
-        threading.Thread(target=worker, daemon=True).start()
+        no_window = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
+        try:
+            logf = open(log_file, "w", encoding="utf-8")
+            self._init_proc = subprocess.Popen(
+                [PYTHON_EXE, RANDOM_INIT_PY, str(seed), out_dir, net_name],
+                cwd=BASE_DIR, stdout=logf, stderr=subprocess.STDOUT,
+                creationflags=no_window)
+            self._init_logf = logf
+            self._init_log_file = log_file
+            self._init_out_dir = out_dir
+            self._init_net_name = net_name
+        except Exception as e:
+            self._init_proc = None
+            self._running = False
+            self.elapsed = 0.0
+            self.init_btn.config(state="normal")
+            self.set_status("随机初始化启动失败", "#c5221f")
+            self.log(f"随机初始化启动失败: {e}")
 
     def on_pause(self):
         if self.state == "training":
@@ -1328,6 +1324,37 @@ class Panel:
         if time.time() - self._last_perf_time >= 2:
             self._last_perf_time = time.time()
             self.update_performance()
+
+        # 随机初始化完成轮询（主线程内，与训练进度同款机制，保证 UI 更新）
+        if getattr(self, "_init_proc", None) is not None:
+            pr = self._init_proc
+            if pr.poll() is not None:
+                self._init_proc = None
+                try:
+                    self._init_logf.close()
+                except Exception:
+                    pass
+                lines = []
+                try:
+                    with open(getattr(self, "_init_log_file", ""), encoding="utf-8",
+                              errors="replace") as f:
+                        lines = f.read().splitlines()
+                except Exception:
+                    pass
+                ok = pr.returncode == 0 and os.path.exists(os.path.join(
+                    getattr(self, "_init_out_dir", ""),
+                    getattr(self, "_init_net_name", "") + ".onnx"))
+                self._running = False
+                self.elapsed += time.time() - self._timer_start
+                for l in lines:
+                    self.log(l)
+                self.log("随机初始化完成，.pt/.onnx/config_snapshot.json/init_info.txt 已输出（可用\"打开…\"导入续训练）"
+                         if ok else "随机初始化失败，详见上方输出")
+                self.set_status("随机初始化完成" if ok else "随机初始化失败",
+                                "#188038" if ok else "#c5221f")
+                self.init_btn.config(state="normal")
+                self.timer_label.config(text=time.strftime("%H:%M:%S",
+                                       time.gmtime(self.elapsed)))
 
         # 阶段切换检测（数据收集完成 → 自动启动网络训练）
         if self.state == "training":

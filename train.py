@@ -172,8 +172,11 @@ def save_checkpoint(path, model, optimizer, step, config, elo=None):
 def load_checkpoint(path, model, optimizer):
     ckpt = torch.load(path, map_location="cpu")
     model.load_state_dict(ckpt["model_state_dict"])
-    optimizer.load_state_dict(ckpt["optimizer_state_dict"])
-    return ckpt["step"], ckpt["config"]
+    if "optimizer_state_dict" in ckpt and optimizer is not None:
+        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+    else:
+        print("[checkpoint] 该检查点无优化器状态（随机初始化网络），使用全新优化器")
+    return ckpt.get("step", 0), ckpt.get("config", {})
 
 
 def wait_while_paused(model, optimizer, step, config, checkpoint_dir, net_name="latest"):
@@ -203,13 +206,14 @@ def train(config, data, checkpoint_dir, resume_from=None, net_name="latest"):
 
     if resume_from is not None and os.path.exists(resume_from):
         _, saved_cfg = load_checkpoint(resume_from, model, optimizer)
-        print("从 checkpoint 恢复（权重 + 优化器）")
-        for key in ["num_residual_blocks", "channels"]:
-            if saved_cfg["network"][key] != net_cfg[key]:
-                print(f"[错误] 结构超参数不一致: {key} "
-                      f"(记录 {saved_cfg['network'][key]} vs 当前 {net_cfg[key]})")
-                sys.exit(1)
-
+        if not saved_cfg:
+            print("[checkpoint] 随机初始化网络：无保存配置，跳过结构比对（结构由当前 config 决定）")
+        else:
+            for key in ["num_residual_blocks", "channels"]:
+                if saved_cfg["network"][key] != net_cfg[key]:
+                    print(f"[错误] 结构超参数不一致: {key} "
+                          f"(记录 {saved_cfg['network'][key]} vs 当前 {net_cfg[key]})")
+                    sys.exit(1)
     boards, graveyards, policies, values, v_boards, v_graves, v_pols, v_vals = data
     boards_t = torch.from_numpy(boards).to(device)
     graves_t = torch.from_numpy(graveyards).to(device)

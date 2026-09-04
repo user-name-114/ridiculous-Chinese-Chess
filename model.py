@@ -7,6 +7,8 @@ import torch.nn.functional as F
 #
 # 输入：棋盘特征 (B, 22, 14, 11) + 墓地向量 (B, 18)
 # 输出：策略 logits (B, 24333) + 价值 (B, 1) in [-1, 1]
+# 墓地向量语义（2026-09-01 修正）：18 维 = 当前行棋方自己坟场的类型+等级计数，
+#   只用于抽奖头（复活己方棋子）；价值头已移除墓地。
 #
 # 动作空间索引（必须与 C# 的 StateEncoder/ActionEncoder 一致）：
 #   移动 0~23715 (from×to)、狙击 23716~24331 (from×方向)、抽奖 24332~27151
@@ -76,7 +78,7 @@ class ChessNet(nn.Module):
         self.value_conv = nn.Conv2d(channels, 1, 1, bias=False)
         self.value_bn = nn.BatchNorm2d(1)
         self.value_fc = nn.Sequential(
-            nn.Linear(BOARD_H * BOARD_W + GRAVEYARD, 256),  # 154 + 18
+            nn.Linear(BOARD_H * BOARD_W, 256),  # 154（墓地向量已从价值头移除：红黑合并编码污染局面判断，审计 2026-08-31）
             nn.ReLU(),
             nn.Linear(256, 1),
         )
@@ -108,7 +110,7 @@ class ChessNet(nn.Module):
         # ── 价值头 ──
         v = F.relu(self.value_bn(self.value_conv(shared)))          # (B, 1, 14, 11)
         v = v.flatten(1)                                            # (B, 154)
-        v = torch.tanh(self.value_fc(torch.cat([v, graveyard], dim=1)))  # (B, 1)
+        v = torch.tanh(self.value_fc(v.flatten(1)))  # (B, 1)（墓地不再进价值头；仅抽奖头使用，见注释）
 
         # ── 拼接策略 ──
         policy = torch.cat([move, sniper, lottery], dim=1)          # (B, 24333)
