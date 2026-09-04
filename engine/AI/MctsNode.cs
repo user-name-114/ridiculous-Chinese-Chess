@@ -14,7 +14,9 @@ public class MctsNode
     public double totalValue;
     public double prior;         // 先验概率 P(s,a)，来自策略网络 softmax（纯 MCTS 时为均匀）
     public bool fullyExpanded;   // 是否已完全展开（所有合法行动都已创建子节点）
-    public bool pruned;          // 被重复检测标记为非法（PUCT 不再选择此节点）
+    public bool pruned;          // 永久剪枝：合法性失败时置位（棋子已移动/冻结等），PUCT 不再选择。
+                                 // 注意：重复检测的临时跳过自 2026-09-04 起由引擎侧 worker 本地
+                                 // 集合（simRepeatSkip）管理，不再写本字段，二者语义已分离。
     public Dictionary<string, double> priorByAction; // 叶节点缓存的所有合法动作先验（actionKey→prob）
 
     // ── ChanceNode 固化选择 ──

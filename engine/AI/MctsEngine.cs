@@ -304,7 +304,7 @@ public class MctsEngine
     private void WorkerSim(MctsNode root, Gamestate rootState,
         RepetitionTracker history, System.Random wr)
     {
-        var prunedThisSim = new List<MctsNode>();
+        var simRepeatSkip = new HashSet<MctsNode>();   // worker 本地临时跳过集，不写共享节点（2026-09-04 修复）
         try
         {
             var __ph = System.Diagnostics.Stopwatch.StartNew();
@@ -319,51 +319,61 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
                 if (IsTerminal(ws)) break;               // 树中途撞上终局
 
                 // ── ChanceNode：采样 outcome，锁内确保唯一创建 ──
-                if (node.IsChanceNode)
+                                if (node.IsChanceNode)
                 {
                     int outcome = wr.Next(1, 41);
                     ((LotteryAction)node.action).lastOutcome = outcome;
-                    MctsNode oc;
+
+                    // ── 方案①（2026-09-04 修复）：候选枚举与评估移出临界区 ──
+                    // 第一段锁只查字典；未命中时在锁外完成 O(n²) 候选枚举与
+                    // SelectLotteryChoiceByValue 评估（仅依赖 worker 私有 ws，无共享状态），
+                    // 再进第二段短锁二次检查并建节点。并发未命中时可能重复计算，
+                    // 先建者胜、后者复用已建节点（仅浪费计算，无正确性影响）。
+                    MctsNode oc = null;
+                    bool miss = false;
+                    LotteryChoice preFc = null;
                     lock (_treeLock)
                     {
                         if (node.outcomeChildren == null)
                             node.outcomeChildren = new Dictionary<int, MctsNode>();
+                        miss = !node.outcomeChildren.TryGetValue(outcome, out oc);
+                    }
+                    if (miss)
+                    {
+                        var chs = LotteryResolver.GetChoices(ws, outcome);
+                        if (chs.Count == 0)
+                            preFc = null;
+                        else if (neural == null)
+                            preFc = chs[wr.Next(chs.Count)];
+                        else
+                        {
+                            // 候选可能成百上千（双生成炮马类目标对）：全量评估会造成评估风暴，超限等距抽样
+                            chs = SampleChoices(chs, lotteryEvalLimit, wr);
+                            preFc = SelectLotteryChoiceByValue(ws, outcome, chs);
+                        }
+                    }
+                    lock (_treeLock)
+                    {
                         if (!node.outcomeChildren.TryGetValue(outcome, out oc))
                         {
-                            var chs = LotteryResolver.GetChoices(ws, outcome);
-                            LotteryChoice fc;
-                            if (chs.Count == 0) fc = null;
-                            else if (neural == null) fc = chs[wr.Next(chs.Count)];
-                            else
-                            {
-                                // 候选可能成百上千（双生成枚举目标对）：
-                                // 全量价值评估会造成评估风暴，超限等距抽样
-                                if (chs.Count > lotteryEvalLimit)
-                                {
-                                    int stepN = chs.Count / lotteryEvalLimit;
-                                    var sub = new List<LotteryChoice>(lotteryEvalLimit);
-                                    for (int ci = 0; ci < chs.Count && sub.Count < lotteryEvalLimit; ci += stepN)
-                                        sub.Add(chs[ci]);
-                                    chs = sub;
-                                }
-                                fc = SelectLotteryChoiceByValue(ws, outcome, chs);
-                            }
-                            oc = new MctsNode(null, node) { fixedChoice = fc };
+                            oc = new MctsNode(null, node) { fixedChoice = preFc };
                             node.outcomeChildren[outcome] = oc;
                         }
                         oc.visitCount++;
                         oc.totalValue -= virtualLossValue;
                         path.Add(oc);
                     }
+
                     if (oc.fixedChoice == null)
                         LotteryResolver.ResolveChoice(ws, outcome, null);
                     else
                         LotteryResolver.ResolveChoice(ws, outcome, oc.fixedChoice);
                     GameAction.EndTurn(ws);
-                    trk.AddState(ws, isLottery: true);   // 抽奖豁免重复计数
+                    trk.AddState(ws, isLottery: true);
                     node = oc;
                     continue;
                 }
+                
 
                 // ── 普通 / 叶判定与选路（统计变更段加锁）──
                 bool reachedLeaf = false;
@@ -383,7 +393,7 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
                     {
                         while (true)
                         {
-                            var child = BestPuctChild(node, wr);
+                            var child = BestPuctChild(node, wr, simRepeatSkip);
                             if (child == null) { exhausted = true; break; }
                             if (child.IsChanceNode)
                             {
@@ -404,8 +414,7 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
                             ExecuteAction(ts, child.action, wr);
                             if (trk.WouldRepeat(ts))
                             {
-                                child.pruned = true;
-                                prunedThisSim.Add(child); // 仅本 sim 临时
+                                                                simRepeatSkip.Add(child); // 仅本 sim 本地跳过（2026-09-04 修复）
                                 continue;
                             }
                             child.visitCount++;
@@ -419,8 +428,7 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
                     }
                 }
 
-                foreach (var n in prunedThisSim) n.pruned = false;
-                prunedThisSim.Clear();
+                simRepeatSkip.Clear();
 
                 if (reachedLeaf || exhausted) break;
 
@@ -477,45 +485,41 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
         }
         finally
         {
-            foreach (var n in prunedThisSim) n.pruned = false;
         }
     }
 
     /// <summary>
-    /// 回传：①补偿路径上所有虚拟损失；②按串行一致的翻转规则自叶向上累加真实结果；
-    /// 含叶节点与根节点的访问计数（保持 parentVisits 口径）。
+    /// 回传（并行版，2026-09-04 重写）：①补偿路径上所有虚拟损失（含叶自身）；
+    /// ②按串行一致的翻转规则自叶向上逐动作节点翻转并累加一次真实结果——
+    /// 叶节点 visitCount 已在 descend 选边时计入，本方法仅给根节点 visitCount+1
+    /// （保持 PUCT parentVisits 口径与串行版一致）。
     /// </summary>
-    private void BackpropAggregate(List<MctsNode> path, MctsNode leaf,
+        private void BackpropAggregate(List<MctsNode> path, MctsNode leaf,
         double result, MctsNode root)
     {
         lock (_treeLock)
         {
+            // 修复（2026-09-03，外部代码审查确认）：旧实现把 leaf 单独处理了一遍——
+            //   leaf.visitCount 二次自增、totalValue 被 -result/+result 抵消、
+            //   整条链多翻转一次导致所有祖先符号反转。改为与串行 Backpropagate 对齐：
+            //   descend 时已计入 visitCount/-VL，此处只补偿 VL 并沿 path 逐动作翻转累加一次。
             foreach (var n in path)
-                n.totalValue += virtualLossValue;         // 补偿选择期的 -VL
+                n.totalValue += virtualLossValue;         // 补偿选择期的 -VL（含叶节点自身）
 
             double r = result;
-            if (leaf != null)
-            {
-                leaf.visitCount++;
-                if (leaf.action != null) r = -r;          // 翻转规则与串行一致
-                leaf.totalValue += r;
-            }
-
-            for (int i = path.Count - 1; i >= 0; i--)
+            for (int i = path.Count - 1; i >= 0; i--)     // 逆序：末位即叶节点
             {
                 var n = path[i];
                 if (n.action != null) r = -r;
                 n.totalValue += r;
             }
 
-            // 串行版会把根也计入 visitCount/totalValue（PUCT 的 parentVisits 依赖它）
             root.visitCount++;
-            root.totalValue += r;
+            root.totalValue += r;                          // root.action == null，不翻转
         }
     }
 
-
-    /// <summary>单线程 MCTS（可指定模拟次数，供并行版调用）</summary>
+/// <summary>单线程 MCTS（可指定模拟次数，供并行版调用）</summary>
     private MctsNode RunMctsSingle(Gamestate state, System.Random rng, int? simsOverride = null)
     {
         return RunMctsSingle(state, rng, simsOverride, null);
@@ -707,14 +711,15 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
             // 否则同一子节点对应不同具体局面，破坏子树状态一致性（历史 bug 根源）
             List<LotteryChoice> choices = LotteryResolver.GetChoices(state, outcome);
             // 候选可能成百上千（双生成枚举目标对）：全量评估会造成评估风暴，超限等距抽样
-            if (choices.Count > lotteryEvalLimit)
-            {
-                int stepN = choices.Count / lotteryEvalLimit;
-                var sub = new List<LotteryChoice>(lotteryEvalLimit);
-                for (int ci = 0; ci < choices.Count && sub.Count < lotteryEvalLimit; ci += stepN)
-                    sub.Add(choices[ci]);
-                choices = sub;
-            }
+            // ── 已知问题（2026-09-04 外部审查核实，按约定注释搁置）──
+            // 问题：纯 MCTS（neural == null）且走串行路径（threadCount <= 1）时，本方法
+            // 先随机无放回抽样到 lotteryEvalLimit 再随机取一个，候选分布是"抽样子集内均匀"；
+            // 并行版 WorkerSim 的对应分支则是全量随机（不抽样）。两版行为不等价，
+            // 且此处对纯随机选择而言抽样步骤是纯浪费。
+            // 搁置原因：① 当前训练与对局均走神经网络模式，纯 MCTS + 串行路径基本不用；
+            // ② 修复需先统一三处口径（本方法 / WorkerSim / ExecuteLotteryOutcome），
+            //    单改此处会制造新的不一致；③ 收益低、回归风险高。
+            choices = SampleChoices(choices, lotteryEvalLimit, rng);
             LotteryChoice fixedChoice;
             if (choices.Count == 0)
                 fixedChoice = null; // 无可选目标，交给 Resolver 的自动路径
@@ -754,6 +759,12 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
             LotteryResolver.ResolveChoice(state, outcome, null);
             return;
         }
+
+        // 修复（2026-09-04，批评确认）：与搜索树内候选逻辑对齐——神经网络模式下
+        // 同样等距抽样到 lotteryEvalLimit，保证树内固化的 choice 与真实执行
+        // 产生自同一候选集；同时消除真实对局数百次 DeepClone+评估的阻塞。
+        if (neural != null)
+            choices = SampleChoices(choices, lotteryEvalLimit, rng);
 
         LotteryChoice selected = neural == null
             ? choices[rng.Next(choices.Count)]
@@ -1260,14 +1271,32 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
     /// <summary>PUCT 选择子节点。Scheme A 下 LotteryAction 使用更高的 C。
     /// F2：完全平手时随机破序，消除动作枚举顺序导致的结构性饿死
     /// （抽奖是枚举末位，在零值世界里会被系统性跳过）。</summary>
-    private MctsNode BestPuctChild(MctsNode node, System.Random rng)
+    /// <summary>
+    /// 无放回均匀抽样（Fisher-Yates 部分洗牌取前 k 个）。
+    /// 修复（2026-09-04，批评确认）：双生成类候选由 for i, for j>i 嵌套循环生成，
+    /// 索引→(i,j) 映射不均匀（小 i 的 pair 密集、大 i 稀疏），原按索引等距取样
+    /// 会系统性偏向列表前段；改为随机无放回抽样后所有候选等概率进入评估子集。
+    /// </summary>
+    private static List<LotteryChoice> SampleChoices(List<LotteryChoice> chs, int k, System.Random rng)
+    {
+        if (chs.Count <= k) return chs;
+        var pool = new List<LotteryChoice>(chs);
+        for (int i = 0; i < k; i++)
+        {
+            int jj = rng.Next(i, pool.Count);
+            (pool[i], pool[jj]) = (pool[jj], pool[i]);
+        }
+        return pool.GetRange(0, k);
+    }
+
+    private MctsNode BestPuctChild(MctsNode node, System.Random rng, HashSet<MctsNode> skip = null)
     {
         double bestVal = double.NegativeInfinity;
         var tied = new List<MctsNode>();
 
         foreach (MctsNode child in node.children)
         {
-            if (child.pruned) continue;
+            if (child.pruned || (skip != null && skip.Contains(child))) continue;
 
             double c = (child.action is LotteryAction)
                 ? explorationConstant * lotteryCMultiplier
@@ -1278,7 +1307,7 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
 
         foreach (MctsNode child in node.children)
         {
-            if (child.pruned) continue;
+            if (child.pruned || (skip != null && skip.Contains(child))) continue;
 
             double c = (child.action is LotteryAction)
                 ? explorationConstant * lotteryCMultiplier
