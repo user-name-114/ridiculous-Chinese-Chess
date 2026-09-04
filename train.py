@@ -126,37 +126,16 @@ def load_data(data_dir):
 
 
 
-def sparse_cross_entropy(logits, indices_list, probs_list):
-    """稀疏策略交叉熵（向量化版）。
+def sparse_cross_entropy(logits, idx_mat, prob_mat):
+    """稠密 padded 版稀疏策略交叉熵（2026-09-04）。
 
-    把整个 batch 的稀疏索引拼接后一次性从 log_softmax 里取值，
-    不再逐样本 Python 循环（batch 大时循环是纯 GPU 空转）。
+    idx_mat/prob_mat: (B, K_max)，无效位置 prob=0（idx 填 0，乘 0 后不产生贡献）。
+    与旧稀疏拼接版数学等价：-(Σ prob·log_softmax(logits)[idx]).sum()/B。
     """
     B = logits.size(0)
     log_probs = F.log_softmax(logits, dim=1)
-
-    parts_idx = []
-    parts_prob = []
-    counts = []
-    for idx, prob in zip(indices_list, probs_list):
-        if idx.numel() == 0:
-            continue
-        parts_idx.append(idx)
-        parts_prob.append(prob)
-        counts.append(idx.numel())
-
-    if not parts_idx:
-        return logits.sum() * 0.0  # 空目标：保持图连通的零损失
-
-    idx_flat = torch.cat(parts_idx, dim=0)
-    prob_flat = torch.cat(parts_prob, dim=0)
-    counts_t = torch.as_tensor(counts, dtype=torch.long, device=logits.device)
-    rows = torch.repeat_interleave(
-        torch.arange(B, device=logits.device), counts_t)
-
-    selected = log_probs[rows, idx_flat]
-    return -(prob_flat * selected).sum() / B
-
+    selected = log_probs.gather(1, idx_mat)
+    return -(selected * prob_mat).sum(dim=1).mean()
 
 def save_checkpoint(path, model, optimizer, step, config, elo=None):
     torch.save({
@@ -215,15 +194,26 @@ def train(config, data, checkpoint_dir, resume_from=None, net_name="latest"):
                           f"(记录 {saved_cfg['network'][key]} vs 当前 {net_cfg[key]})")
                     sys.exit(1)
     boards, graveyards, policies, values, v_boards, v_graves, v_pols, v_vals = data
-    boards_t = torch.from_numpy(boards).to(device)
-    graves_t = torch.from_numpy(graveyards).to(device)
-    values_t = torch.from_numpy(values).float().to(device)
-    v_boards_t = torch.from_numpy(v_boards).to(device)
-    v_graves_t = torch.from_numpy(v_graves).to(device)
-    v_vals_t = torch.from_numpy(v_vals).float().to(device)
-    # policies 是 list of (np indices, np probs)，转成 GPU tensor
-    pol_idx = [torch.from_numpy(p[0]).long().to(device) for p in policies]
-    pol_prob = [torch.from_numpy(p[1]).float().to(device) for p in policies]
+    # 修复（2026-09-04）：数据集不再全量常驻 GPU——旧版占显存约62%且随num_games线性增长。
+    # 改为 CPU numpy 存储 + 每 step 按 batch 索引后单独传 GPU；
+    # policies 打包为 (N, K_max) 稠密矩阵（无效位 prob=0），与稀疏拼接版数学严格等价。
+    boards_np, graves_np, values_np = boards, graveyards, values
+    N = len(policies)
+    K = max((len(p[0]) for p in policies), default=1)
+    pol_idx_np = np.zeros((N, K), dtype=np.int64)
+    pol_prob_np = np.zeros((N, K), dtype=np.float32)
+    for i, p in enumerate(policies):
+        k = len(p[0])
+        pol_idx_np[i, :k] = p[0]
+        pol_prob_np[i, :k] = p[1]
+    Nv = len(v_pols)
+    Kv = max((len(t[0]) for t in v_pols), default=1)
+    v_pol_idx_np = np.zeros((Nv, Kv), dtype=np.int64)
+    v_pol_prob_np = np.zeros((Nv, Kv), dtype=np.float32)
+    for i, t in enumerate(v_pols):
+        k = len(t[0])
+        v_pol_idx_np[i, :k] = t[0]
+        v_pol_prob_np[i, :k] = t[1]
 
     tr_cfg = config["training"]
     batch_size = tr_cfg["batch_size"]
@@ -235,10 +225,11 @@ def train(config, data, checkpoint_dir, resume_from=None, net_name="latest"):
     if device.type == "cuda":
         props = torch.cuda.get_device_properties(0)
         print(f"GPU: {props.name} ({props.total_memory / 1024**3:.1f} GB) | AMP={use_amp}")
-    n = boards_t.size(0)
+    n = boards_np.shape[0]
 
     os.makedirs(checkpoint_dir, exist_ok=True)
 
+    torch.manual_seed(42); np.random.seed(42)
     model.train()
     perm = np.random.permutation(n)  # 无放回抽样：打乱后的索引队列
     ptr = 0
@@ -253,11 +244,11 @@ def train(config, data, checkpoint_dir, resume_from=None, net_name="latest"):
         indices = perm[ptr:ptr + batch_size]
         ptr += batch_size
 
-        x = boards_t[indices]
-        g = graves_t[indices]
-        v_target = values_t[indices]
-        b_idx = [pol_idx[i] for i in indices]
-        b_prob = [pol_prob[i] for i in indices]
+        x = torch.from_numpy(boards_np[indices]).to(device, non_blocking=True)
+        g = torch.from_numpy(graves_np[indices]).to(device, non_blocking=True)
+        v_target = torch.from_numpy(values_np[indices]).float().to(device, non_blocking=True)
+        b_idx = torch.from_numpy(pol_idx_np[indices]).to(device, non_blocking=True)
+        b_prob = torch.from_numpy(pol_prob_np[indices]).to(device, non_blocking=True)
 
         if use_amp:
             with torch.autocast(device_type="cuda", dtype=torch.float16):
@@ -281,8 +272,7 @@ def train(config, data, checkpoint_dir, resume_from=None, net_name="latest"):
 
         if step % 50 == 0:
             with torch.no_grad():
-                _es = sum(float(-(t * t.clamp_min(1e-12).log()).sum()) for t in b_prob)
-                tgt_ent = _es / len(b_prob)
+                tgt_ent = float(-(b_prob * b_prob.clamp_min(1e-12).log()).sum(dim=1).mean())
             print(f"step {step}/{num_steps}  loss={loss.item():.4f}  "
                   f"policy={policy_loss.item():.4f}（目标熵{tgt_ent:.4f}）  value={value_loss.item():.4f}")
 
@@ -293,15 +283,15 @@ def train(config, data, checkpoint_dir, resume_from=None, net_name="latest"):
             vn = 0
             with torch.no_grad(), torch.autocast(device_type="cuda", enabled=use_amp):
                 for vstart in range(0, v_boards.shape[0], 256):
-                    vslice = v_pols[vstart:vstart + 256]
                     vx = torch.from_numpy(v_boards[vstart:vstart + 256]).to(device)
                     vg = torch.from_numpy(v_graves[vstart:vstart + 256]).to(device)
                     vy = torch.from_numpy(v_vals[vstart:vstart + 256]).to(device)
                     vpol, vval = model(vx, vg)
                     vval = vval.squeeze(1)
-                    vps += sparse_cross_entropy(vpol,
-                                                [torch.from_numpy(t[0]).to(device) for t in vslice],
-                                                [torch.from_numpy(t[1]).to(device) for t in vslice]).item()
+                    vps += sparse_cross_entropy(
+                        vpol,
+                        torch.from_numpy(v_pol_idx_np[vstart:vstart + 256]).to(device),
+                        torch.from_numpy(v_pol_prob_np[vstart:vstart + 256]).to(device)).item()
                     vvs_ += F.mse_loss(vval.float(), vy).item()
                     vn += 1
             model.train()
