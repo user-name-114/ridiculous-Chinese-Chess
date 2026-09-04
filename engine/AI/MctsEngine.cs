@@ -117,7 +117,9 @@ public class MctsEngine
     // ── 诊断计数器（静态，跨引擎实例共享；ResetStats 后按次读取差值）──
     internal static long StatRollouts, StatRolloutTerm, StatSweeps, StatSweepCand, StatChanceSel, StatNewPairs;
     internal static long StatPhaseCloneDescend, StatPhaseNN, StatPhaseRoll, StatPhaseExpandBack;
-    internal static void ResetStats() { StatRollouts = StatRolloutTerm = StatSweeps = StatSweepCand = StatChanceSel = StatNewPairs = 0; }
+    internal static long StatPhaseExpandPre, StatPhaseExpandLock, StatPhaseWorkerWall;
+    // 2026-09-04 起全部计时器改 ElapsedTicks 累计（消除 (long)ms 截断），读取时 /Stopwatch.Frequency*1000
+    internal static void ResetStats() { StatRollouts = StatRolloutTerm = StatSweeps = StatSweepCand = StatChanceSel = StatNewPairs = 0; StatPhaseCloneDescend = StatPhaseNN = StatPhaseRoll = StatPhaseExpandBack = StatPhaseExpandPre = StatPhaseExpandLock = StatPhaseWorkerWall = 0; }
 
     private double evalMaterialWeight;
     private int lotteryEvalLimit;
@@ -305,6 +307,7 @@ public class MctsEngine
         RepetitionTracker history, System.Random wr)
     {
         var simRepeatSkip = new HashSet<MctsNode>();   // worker 本地临时跳过集，不写共享节点（2026-09-04 修复）
+        var __wall = System.Diagnostics.Stopwatch.StartNew();   // 整个 WorkerSim（单次模拟）总墙钟
         try
         {
             var __ph = System.Diagnostics.Stopwatch.StartNew();
@@ -439,7 +442,7 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
                 _ = nextNode;                              // node 已在锁内前移
             }
 
-            System.Threading.Interlocked.Add(ref StatPhaseCloneDescend, (long)__ph.Elapsed.TotalMilliseconds);
+            System.Threading.Interlocked.Add(ref StatPhaseCloneDescend, __ph.ElapsedTicks);
             __ph.Restart();
             // ── 叶评估（全部在锁外）──
             double result;
@@ -451,7 +454,7 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
                 var __nn = System.Diagnostics.Stopwatch.StartNew();
                 var (pol, vNet) = neural.PredictBlocking(ws);
                 __nn.Stop();
-                System.Threading.Interlocked.Add(ref StatPhaseNN, (long)__nn.Elapsed.TotalMilliseconds);
+                System.Threading.Interlocked.Add(ref StatPhaseNN, __nn.ElapsedTicks);
                 priors = pol;
                 result = ws.currentTeam == -1 ? -vNet : vNet;
             }
@@ -460,11 +463,14 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
                 var __rl = System.Diagnostics.Stopwatch.StartNew();
                 result = Simulate(ws, wr);
                 __rl.Stop();
-                System.Threading.Interlocked.Add(ref StatPhaseRoll, (long)__rl.Elapsed.TotalMilliseconds);
+                System.Threading.Interlocked.Add(ref StatPhaseRoll, __rl.ElapsedTicks);
             }
 
             // 展开（若刚才到达的是未展开叶；存在竞态时幂等跳过）
+            var __ex = System.Diagnostics.Stopwatch.StartNew();
             Gamestate expandState = ws.DeepClone();   // 修复(位置已核正)：快照=叶子原局面（Select 之后）
+            long __exPre = __ex.ElapsedTicks;
+            System.Threading.Interlocked.Add(ref StatPhaseExpandPre, __exPre);
             if (!IsTerminal(expandState) && leafFound != null && leafFound.children.Count == 0)
             {
                 lock (_treeLock)
@@ -476,15 +482,17 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
                             AddDirichletNoise(root, wr);
                     }
                 }
+                System.Threading.Interlocked.Add(ref StatPhaseExpandLock, __ex.ElapsedTicks - __exPre);
             }
 
             var __eb = System.Diagnostics.Stopwatch.StartNew();
             BackpropAggregate(path, leafFound, result, root);
             __eb.Stop();
-            System.Threading.Interlocked.Add(ref StatPhaseExpandBack, (long)__eb.Elapsed.TotalMilliseconds);
+            System.Threading.Interlocked.Add(ref StatPhaseExpandBack, __eb.ElapsedTicks);
         }
         finally
         {
+            System.Threading.Interlocked.Add(ref StatPhaseWorkerWall, __wall.ElapsedTicks);
         }
     }
 

@@ -37,6 +37,9 @@ public class NeuralMcts
     private int _batchSize;
     private int _batchTimeoutMs;
 
+    // 2026-09-04 GPU 线程统计（诊断用）：批数 / 样本总数 / GPU 计算累计 ticks
+    internal static long StatGpuBatches, StatGpuSamples, StatGpuTicks;
+
     // 调用方预编码后提交的请求
     private struct PredictRequest
     {
@@ -184,7 +187,7 @@ public class NeuralMcts
         float[] board = StateEncoder.Encode(state);
         float[] graveyard = StateEncoder.EncodeGraveyard(state);
 
-        var tcs = new TaskCompletionSource<(float[] policy, float value)>();
+        var tcs = new TaskCompletionSource<(float[] policy, float value)>(TaskCreationOptions.RunContinuationsAsynchronously);   // 2026-09-04 修复：避免 GPU 线程在 SetResult 时同步跑 worker continuation
         _requestQueue.Add(new PredictRequest { Board = board, Graveyard = graveyard, Tcs = tcs });
         return tcs.Task.Result;
     }
@@ -246,6 +249,9 @@ public class NeuralMcts
             try { batch = _gpuInputQueue.Take(); }
             catch (InvalidOperationException) { break; }
 
+            System.Threading.Interlocked.Increment(ref StatGpuBatches);
+            System.Threading.Interlocked.Add(ref StatGpuSamples, batch.Count);
+            var __g = System.Diagnostics.Stopwatch.StartNew();
             try
             {
                 var (policies, values) = PredictBatchFromEncoded(
@@ -257,6 +263,10 @@ public class NeuralMcts
             {
                 for (int i = 0; i < batch.Count; i++)
                     batch.TcsList[i].SetException(ex);
+            }
+            finally
+            {
+                System.Threading.Interlocked.Add(ref StatGpuTicks, __g.ElapsedTicks);
             }
         }
     }
