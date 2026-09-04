@@ -111,8 +111,10 @@ public static class StateEncoder
     public static float[] EncodeGraveyard(Gamestate state)
     {
         float[] grave = new float[GraveyardSize];
-        CountGraveyard(state.redGraveyard, grave);
-        CountGraveyard(state.blackGraveyard, grave);
+        // 修正（2026-09-01）：只统计当前行棋方自己的坟场——抽奖头的复活选择只关心己方损失；
+        // 此前红黑合并累加导致“谁的子被吃”信息缺失（墓地审计结论）。
+        var ownGraveyard = (state.currentTeam == 1) ? state.redGraveyard : state.blackGraveyard;
+        CountGraveyard(ownGraveyard, grave);
         return grave;
     }
 

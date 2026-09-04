@@ -434,7 +434,6 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
             System.Threading.Interlocked.Add(ref StatPhaseCloneDescend, (long)__ph.Elapsed.TotalMilliseconds);
             __ph.Restart();
             // ── 叶评估（全部在锁外）──
-            var expandState = ws.DeepClone();   // 修复：叶子原局面快照（同 RunMctsSingle）
             double result;
             float[] priors = null;
             if (IsTerminal(ws))
@@ -457,6 +456,7 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
             }
 
             // 展开（若刚才到达的是未展开叶；存在竞态时幂等跳过）
+            Gamestate expandState = ws.DeepClone();   // 修复(位置已核正)：快照=叶子原局面（Select 之后）
             if (!IsTerminal(expandState) && leafFound != null && leafFound.children.Count == 0)
             {
                 lock (_treeLock)
@@ -560,7 +560,6 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
                 continue;
 
             validSims++;
-            Gamestate expandState = workState.DeepClone();   // 修复：叶子原局面快照——Simulate 会随机走子污染 workState，展开必须用快照
 
             double result;
             float[] priors = null;
@@ -584,6 +583,7 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
             { throw new Exception($"Simulate failed at sim {validSims}: {ex.Message}", ex); }
 
             // 展开叶节点（策略网络先验或均匀先验）；ChanceNode 不在此展开（由 HandleChanceNode 管理）
+            Gamestate expandState = workState.DeepClone();   // 修复(位置已核正)：快照=叶子原局面（Select 之后）
             if (!IsTerminal(expandState) && leaf.children.Count == 0 && !leaf.IsChanceNode)
             {
                 ExpandAll(leaf, expandState, priors);
