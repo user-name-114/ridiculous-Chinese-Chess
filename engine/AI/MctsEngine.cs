@@ -447,15 +447,17 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
             // ── 叶评估（全部在锁外）──
             double result;
             float[] priors = null;
+            int priorsOffset = 0;
             if (IsTerminal(ws))
                 result = Evaluate(ws);
             else if (neural != null)
             {
                 var __nn = System.Diagnostics.Stopwatch.StartNew();
-                var (pol, vNet) = neural.PredictBlocking(ws);
+                var (pol, polOff, vNet) = neural.PredictBlocking(ws);
                 __nn.Stop();
                 System.Threading.Interlocked.Add(ref StatPhaseNN, __nn.ElapsedTicks);
                 priors = pol;
+                priorsOffset = polOff;
                 result = ws.currentTeam == -1 ? -vNet : vNet;
             }
             else
@@ -477,7 +479,7 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
                 {
                     if (leafFound.children.Count == 0 && !IsTerminal(expandState))
                     {
-                        ExpandAll(leafFound, expandState, priors);
+                        ExpandAll(leafFound, expandState, priors, priorsOffset);
                         if (leafFound == root && dirichletAlpha > 0 && dirichletEpsilon > 0)
                             AddDirichletNoise(root, wr);
                     }
@@ -575,14 +577,16 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
 
             double result;
             float[] priors = null;
+            int priorsOffset = 0;
             try
             {
                 if (IsTerminal(workState))
                     result = Evaluate(workState);
                 else if (neural != null)
                 {
-                    var (p, v) = neural.PredictBlocking(workState);
+                    var (p, pOff, v) = neural.PredictBlocking(workState);
                     priors = p;
+                    priorsOffset = pOff;
                     result = v;
                     // 网络 value 是固定红方视角，转成叶节点玩家视角（黑方时取反）
                     if (workState.currentTeam == -1)
@@ -598,7 +602,7 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
             Gamestate expandState = workState.DeepClone();   // 修复(位置已核正)：快照=叶子原局面（Select 之后）
             if (!IsTerminal(expandState) && leaf.children.Count == 0 && !leaf.IsChanceNode)
             {
-                ExpandAll(leaf, expandState, priors);
+                ExpandAll(leaf, expandState, priors, priorsOffset);
                 // 根节点加 Dirichlet 噪声（AlphaZero 探索，仅自对弈时 dirichletAlpha>0）
                 if (leaf == root && dirichletAlpha > 0 && dirichletEpsilon > 0)
                     AddDirichletNoise(root, rng);
@@ -829,7 +833,7 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
     /// 的先验概率 P(s,a) 初始化（纯 MCTS 时用均匀先验）。动作在此不执行，
     /// 由 Select 在遍历时执行。
     /// </summary>
-    private void ExpandAll(MctsNode node, Gamestate state, float[] rootPolicy)
+    private void ExpandAll(MctsNode node, Gamestate state, float[] rootPolicy, int policyOffset)
     {
         var allActions = GetFilteredActions(state);
         int n = allActions.Count;
@@ -842,7 +846,8 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
             for (int i = 0; i < n; i++)
             {
                 int idx = ActionToIndex(allActions[i]);
-                double lg = (idx >= 0 && idx < rootPolicy.Length) ? rootPolicy[idx] : double.NegativeInfinity;
+                int gi = policyOffset + idx;
+                double lg = (idx >= 0 && gi >= 0 && gi < rootPolicy.Length) ? rootPolicy[gi] : double.NegativeInfinity;
                 probs[i] = lg;
                 if (lg > maxLogit) maxLogit = lg;
             }

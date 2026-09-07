@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
@@ -47,7 +47,7 @@ public class NeuralMcts
     {
         public float[] Board;      // 预编码的棋盘特征 (3388)
         public float[] Graveyard;  // 预编码的墓地向量 (18)
-        public TaskCompletionSource<(float[] policy, float value)> Tcs;
+        public TaskCompletionSource<(float[] policy, int policyOffset, float value)> Tcs;
     }
 
     // 收集线程攒好的批次，交给 GPU 线程
@@ -55,7 +55,7 @@ public class NeuralMcts
     {
         public float[][] Boards;
         public float[][] Graveyards;
-        public TaskCompletionSource<(float[] policy, float value)>[] TcsList;
+        public TaskCompletionSource<(float[] policy, int policyOffset, float value)>[] TcsList;
         public int Count;
     }
 
@@ -185,16 +185,20 @@ public class NeuralMcts
     }
 
     /// <summary>提交推理请求，阻塞直到结果返回。
-    /// 调用方线程在提交前完成 StateEncoder.Encode。</summary>
-    public (float[] policy, float value) PredictBlocking(Gamestate state)
+    /// 调用方线程在提交前完成 StateEncoder.Encode。
+    /// 2026-09-07 零拷贝：policy 为整批共享的底层缓冲，policyOffset 是本样本起始下标。</summary>
+    public (float[] policy, int policyOffset, float value) PredictBlocking(Gamestate state)
     {
         if (_requestQueue == null || !_batchRunning)
-            return Predict(state);
+        {
+            var (p, v) = Predict(state);
+            return (p, 0, v);
+        }
 
         float[] board = StateEncoder.Encode(state);
         float[] graveyard = StateEncoder.EncodeGraveyard(state);
 
-        var tcs = new TaskCompletionSource<(float[] policy, float value)>(TaskCreationOptions.RunContinuationsAsynchronously);   // 2026-09-04 修复：避免 GPU 线程在 SetResult 时同步跑 worker continuation
+        var tcs = new TaskCompletionSource<(float[] policy, int policyOffset, float value)>(TaskCreationOptions.RunContinuationsAsynchronously);   // 2026-09-04 修复：避免 GPU 线程在 SetResult 时同步跑 worker continuation
         _requestQueue.Add(new PredictRequest { Board = board, Graveyard = graveyard, Tcs = tcs });
         return tcs.Task.Result;
     }
@@ -207,7 +211,7 @@ public class NeuralMcts
         {
             var boards = new List<float[]>(_batchSize);
             var graveyards = new List<float[]>(_batchSize);
-            var tcsList = new List<TaskCompletionSource<(float[] policy, float value)>>(_batchSize);
+            var tcsList = new List<TaskCompletionSource<(float[] policy, int policyOffset, float value)>>(_batchSize);
 
             // 阻塞等第一个请求
             PredictRequest first;
@@ -261,10 +265,10 @@ public class NeuralMcts
             var __g = System.Diagnostics.Stopwatch.StartNew();
             try
             {
-                var (policies, values) = PredictBatchFromEncoded(
+                var (flatPolicy, values) = PredictBatchFromEncoded(
                     batch.Boards, batch.Graveyards, batch.Count);
                 for (int i = 0; i < batch.Count; i++)
-                    batch.TcsList[i].SetResult((policies[i], values[i]));
+                    batch.TcsList[i].SetResult((flatPolicy, i * RootActionSize, values[i]));
             }
             catch (Exception ex)
             {
@@ -278,7 +282,7 @@ public class NeuralMcts
         }
     }
 
-    private (float[][] policies, float[] values) PredictBatchFromEncoded(
+    private (float[] flatPolicy, float[] values) PredictBatchFromEncoded(
         float[][] boards, float[][] graveyards, int batch)
     {
         float[] boardFlat = new float[batch * StateEncoder.FeatureSize];
@@ -306,20 +310,33 @@ public class NeuralMcts
         System.Threading.Interlocked.Add(ref StatT2, __t.ElapsedTicks);
         __t.Restart();
 
-        float[] policyFlat = results.First(r => r.Name == "policy").AsTensor<float>().ToArray();
-        float[] values = results.First(r => r.Name == "value").AsTensor<float>().ToArray();
+        // 2026-09-07 零拷贝优化（T3+T4 从 ~4.9ms/批 → 近零）：
+        // 旧实现 policyFlat = ...ToArray() 多复制一次 ~3MB，再逐样本 new float[24333]
+        // 拆分（31×97KB 的 LOH 分配是 T4 异常 3.17ms 的主因）。
+        // 现在直接把 ORT 输出的底层缓冲按偏移交给 worker（视图共享同一数组，
+        // 数组随 worker 引用存活，无覆盖风险），数值与旧路径逐位一致。
+        var policyTensor = results.First(r => r.Name == "policy").AsTensor<float>();
+        var valueTensor = results.First(r => r.Name == "value").AsTensor<float>();
+        if (policyTensor is DenseTensor<float> pdt
+            && System.Runtime.InteropServices.MemoryMarshal.TryGetArray<float>(pdt.Buffer, out var pseg)
+            && pseg.Offset == 0 && pseg.Count == batch * RootActionSize
+            && valueTensor is DenseTensor<float> vdt
+            && System.Runtime.InteropServices.MemoryMarshal.TryGetArray<float>(vdt.Buffer, out var vseg)
+            && vseg.Count == batch)
+        {
+            System.Threading.Interlocked.Add(ref StatT3, __t.ElapsedTicks);
+            __t.Restart();
+            System.Threading.Interlocked.Add(ref StatT4, __t.ElapsedTicks);
+            return (pseg.Array, vseg.Array);
+        }
+
+        // 兜底：底层缓冲不可直接提取时走旧拷贝路径
+        float[] policyFlat = policyTensor.ToArray();
+        float[] values = valueTensor.ToArray();
         System.Threading.Interlocked.Add(ref StatT3, __t.ElapsedTicks);
         __t.Restart();
-
-        float[][] policies = new float[batch][];
-        for (int i = 0; i < batch; i++)
-        {
-            policies[i] = new float[RootActionSize];
-            Array.Copy(policyFlat, i * RootActionSize, policies[i], 0, RootActionSize);
-        }
         System.Threading.Interlocked.Add(ref StatT4, __t.ElapsedTicks);
-
-        return (policies, values);
+        return (policyFlat, values);
     }
 
     // ================================================================
