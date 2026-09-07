@@ -51,12 +51,12 @@ PARAM_INFO = {
     "mcts.temp_threshold": ("温度阈值", "前多少步用温度随机采样，之后贪心选最优", False),
     "selfplay.dirichlet_alpha": ("Dirichlet α", "开局探索噪声强度，越大越鼓励尝试新走法", False),
     "selfplay.dirichlet_epsilon": ("Dirichlet ε", "噪声占先验概率的比例（0~1），越大越随机", False),
-    "selfplay.max_moves": ("最大步数", "单局最大步数，超时判和", False),
-        "selfplay.parallel_games": ("并行局数", "同时自对弈局数。与每局MCTS线程相乘≈总线程数，等于/略低于CPU逻辑核数最快——超订反而下降（实测144线程比32线程慢一倍以上）。2026-09-04 实测：pg4×t8 全局1217 sims/s，约为24×6的2~3倍。32逻辑核推荐 4~8", False),
-        "selfplay.mcts_threads": ("每局MCTS线程(树内并行K)", "每局搜索树内的并行worker数（虚拟损失共享树）。NN请求密度×K，是吞吐主杠杆：单局实测 tc=1→8→16 = 81→515→600 sims/s。请求越密批越大GPU效率越高；推荐 8~16，并与 parallel_games 相乘≈逻辑核数", False),
-    "selfplay.neural_batch_size": ("神经网络批量大小", "GPU一次推理处理多少个局面。注意应≈或略低于并发请求数(局数×每局线程)，否则批次靠超时收尾每批白等；显存侧很富余，真正的显存大头是 train.py 全量常驻GPU的数据集(约62%，随num_games线性增长——按200步/局上界估算，num_games≈2000时逼近8G卡上限)。", False),
-    "selfplay.neural_batch_timeout_ms": ("批量超时(ms)", "攒批最长等待毫秒数。2026-09-04 实测：自对弈 1ms 比 3ms 慢（批更小、GPU调用更频），3ms 已验证合理勿调小。注意并发请求数 < neural_batch_size 时每批靠超时收尾（白等一个 timeout）：对战 16局×t6=96<128 正是此盲区——此时应把 neural_batch_size 降到 ≤ 并发请求数（如 64），而不是加长超时", False),
-    "selfplay.match_parallel_games": ("对战并行局数", "同时进行多少局对战。每局同时只有一方在搜索(线程数=mcts_threads)，总线程=局数×mcts_threads；mcts_threads=8 时 32 逻辑核推荐 2~4 局（16 局=128 线程会超订降速）；调大加快评测、调小减少CPU争抢", False),
+    "selfplay.max_moves": ("最大步数", "单局最大步数。达到上限时按红方胜计入训练价值（代码写死 winner=1，不是判和）；600 sims 下极少触发", False),
+        "selfplay.parallel_games": ("并行局数", "同时自对弈局数。NN 指导自对弈下 CPU 几乎空闲（实测整机 ~6%，worker 基本都阻塞在等 NN），此参数不再是吞吐主杠杆：4→8 实测仅 +4~14%（在运行间噪声内），作用主要是增大攒批波次。纯 MCTS 模式（无网络）下仍受 CPU 限制，另当别论", False),
+        "selfplay.mcts_threads": ("每局MCTS线程(树内并行K)", "每局搜索树内的并行worker数（虚拟损失共享树）。作用：决定并发 NN 请求数（局数×K=并发请求），从而决定实际批量大小。NN 模式下 CPU 几乎空闲，无需按逻辑核数配置；实测 8 附近即可，调大调小收益都在运行间噪声内（2026-09-07）", False),
+    "selfplay.neural_batch_size": ("神经网络批量大小", "GPU 一次推理处理的局面数上限。实测批量顶满上限后再加大无收益（B≥31 进入 ms/样本平台；8×32 与 8×64 差异在噪声内）。train.py 数据集已改为 CPU 存储+按批上传（2026-09-04），显存不再是约束", False),
+    "selfplay.neural_batch_timeout_ms": ("批量超时(ms)", "攒批最长等待毫秒数。2026-09-07 实测最大杠杆：3→12 使 req/s 中位 +108~137%（批量从 18.7 顶满 32 上限），且 N=8 seed 配对检验证明对搜索语义零影响。太小会把请求流切碎成小批（当时 pg6 比 pg4 更差的根因）；当前 config=12 勿调回小值", False),
+    "selfplay.match_parallel_games": ("对战并行局数", "同时进行多少局对战。NN 模式下 CPU 非瓶颈（实测 ~6%），主要影响批量密度；推荐 4~8。对战模拟数强制等于全局 mcts.num_mcts_sims（公平性）", False),
     "training.use_amp": ("混合精度(fp16)", "训练用AMP：卷积等重算子在fp16加速，BN/softmax自动保持fp32，GradScaler防下溢。实测提速约1.5~2倍；若遇NaN先关此项排查", False),
 }
 
