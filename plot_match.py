@@ -6,7 +6,7 @@
 输出（文件名保持原版简短命名，名字体现在图内标题与图例）：
   图1_抽奖次数分布.png   图2_抽奖占比散点.png   图3_双方抽奖散点.png
   双网络对战额外输出：
-  图3_抽奖次数分布2.png  图4_抽奖占比散点2.png  图5_双方抽奖散点.png
+  图4_抽奖占比散点2.png  图5_抽奖次数分布2.png
 """
 import csv
 import os
@@ -64,8 +64,8 @@ def bin_index(n):
     return next(i for i, (lo, hi) in enumerate(BOUNDS) if lo <= n < hi)
 
 
-def plot1(rows, out, name1):
-    """图1：抽奖次数区间柱状图（原版样式 + 数值标注），颜色区分 name1 胜负。"""
+def plot1(rows, out, name1, label="图1"):
+    """抽奖次数区间柱状图（原版样式 + 数值标注），颜色区分 name1 胜负。label 为图内编号前缀。"""
     win = [0] * len(LABELS)
     lose = [0] * len(LABELS)
     draw = [0] * len(LABELS)
@@ -92,7 +92,7 @@ def plot1(rows, out, name1):
         plt.bar_label(bars, padding=2, fontsize=8)
     plt.xlabel(f"{name1} 抽奖次数区间")
     plt.ylabel("局数")
-    plt.title(f"图1：{name1} 抽奖次数分布（按胜负分色）  胜率 {win_rate:.1f}%")
+    plt.title(f"{label}：{name1} 抽奖次数分布（按胜负分色）  胜率 {win_rate:.1f}%")
     plt.xticks(x, LABELS)
     plt.legend()
     plt.tight_layout()
@@ -100,8 +100,8 @@ def plot1(rows, out, name1):
     plt.close()
 
 
-def plot2(rows, out, name1):
-    """图2：每局抽奖占比散点（原版样式），图例带网络名。"""
+def plot2(rows, out, name1, label="图2"):
+    """每局抽奖占比散点（原版样式），图例带网络名。label 为图内编号前缀。"""
     plt.figure(figsize=(8, 5))
     for r in rows:
         ratio = r["lot1"] / max(1, r["moves"]) * 100.0
@@ -115,7 +115,7 @@ def plot2(rows, out, name1):
     plt.legend(handles=handles)
     plt.xlabel("局号")
     plt.ylabel(f"{name1} 抽奖占比（抽奖次数 / 步数，%）")
-    plt.title(f"图2：{name1} 每局抽奖占比（按胜负分色）")
+    plt.title(f"{label}：{name1} 每局抽奖占比（按胜负分色）")
     plt.tight_layout()
     plt.savefig(out, dpi=120)
     plt.close()
@@ -166,14 +166,9 @@ def main(csv_path, name1=None, name2=None):
     plot1(rows, os.path.join(outdir, "图1_抽奖次数分布.png"), name1)
     plot2(rows, os.path.join(outdir, "图2_抽奖占比散点.png"), name1)
     plot3(rows, os.path.join(outdir, "图3_双方抽奖散点.png"), name1, name2,
-          dual=(has_p1 and name2 not in ("纯MCTS", "P2")))
+        dual=(has_p1 and name2 not in ("纯MCTS", "P2")))
     if has_p1 and name2 not in ("纯MCTS", "P2"):
         # 双网络对战：为网络2 生成对称的两张图（胜负按 name2 视角）
-        rows2 = [{"lot1": r["lot2"],
-                  "result": (("P2" == "P2") and (
-                      (r["result"] == "和") or
-                      (r["result"] == f"{name1}胜" and False) or True))} for r in rows]
-        # 重新以 name2 视角构造：name2胜 = name1负
         rows2 = []
         for r in rows:
             res2 = ("和" if r["result"] == "和"
@@ -181,24 +176,11 @@ def main(csv_path, name1=None, name2=None):
                           else f"{name2}负"))
             rows2.append({"lot1": r["lot2"], "result": res2, "moves": r["moves"],
                           "game": r["game"]})
-        plot1(rows2, os.path.join(outdir, "图3_抽奖次数分布2.png"), name2)
-        plot2(rows2, os.path.join(outdir, "图4_抽奖占比散点2.png"), name2)
-        plt.figure(figsize=(8, 5))
-        mk = {f"{name1}胜": "o", f"{name1}负": "x", "和": "s"}
-        for r in rows:
-            m = mk.get(r["result"], "s")
-            plt.scatter(r["moves"], r["lot1"], c=NET1_COLOR, marker=m, s=22, alpha=0.6)
-            plt.scatter(r["moves"], r["lot2"], c=NET2_COLOR, marker=m, s=22, alpha=0.6)
-        handles = [mpatches.Patch(color=NET1_COLOR, label=name1),
-                   mpatches.Patch(color=NET2_COLOR, label=name2)]
-        mh = [plt.Line2D([], [], color="black", marker=m, linestyle="", label=l)
-              for m, l in zip(["o", "x", "s"], [f"{name1}胜", f"{name1}负", "和"])]
-        plt.legend(handles=handles + mh)
-        plt.xlabel("总步数"); plt.ylabel("抽奖次数")
-        plt.title(f"图5：双方抽奖数 vs 总步数（{name1} 视角）")
-        plt.tight_layout()
-        plt.savefig(os.path.join(outdir, "图5_双方抽奖散点.png"), dpi=120)
-        plt.close()
+        # 2026-09-06 修复：原「图5_双方抽奖散点」与「图3_双方抽奖散点」内容重复，
+        # 已删除；原「图3_抽奖次数分布2」改为「图5_抽奖次数分布2」（标题同步改图5），
+        # 原「图4_抽奖占比散点2」标题同步修正为图4（此前误显示"图2"）。
+        plot1(rows2, os.path.join(outdir, "图5_抽奖次数分布2.png"), name2, label="图5")
+        plot2(rows2, os.path.join(outdir, "图4_抽奖占比散点2.png"), name2, label="图4")
         print("已生成 5 张图")
     else:
         print("已生成 3 张图")
