@@ -23,7 +23,8 @@ public static class MatchProgram
         int parallelGames, string progressFile, bool prepareMode = false,
         double evalMaterialWeight = 0.15, double virtualLossValue = 0.5,
         int lotteryEvalLimit = 16,
-        string pauseFlag = null)
+        string pauseFlag = null,
+        int neuralBatchSize = 0, int neuralBatchTimeoutMs = 2)
     {
         Directory.CreateDirectory(outputDir);
         Console.OutputEncoding = Encoding.UTF8;
@@ -60,6 +61,16 @@ public static class MatchProgram
 
         NeuralMcts neuralA = net1 != null ? new NeuralMcts(net1) : null;
         NeuralMcts neuralB = net2 != null ? new NeuralMcts(net2) : null;
+        // 2026-09-06 修复：对战模式与训练自对弈对齐——启动流水线批量推理服务。
+        // 之前对战只 new NeuralMcts 不调 StartBatchService，worker 叶评估全部走同步单条
+        // session.Run（NeuralMcts.PredictBlocking 无队列时回退），600 sims 的 NN 调用无
+        // 法攒批，每步比自对弈（batch=8 流水线）慢 ~1.5~2 倍。4+4 配置（pg4×t8）与此对齐。
+        if (neuralBatchSize > 0)
+        {
+            neuralA?.StartBatchService(neuralBatchSize, neuralBatchTimeoutMs);
+            neuralB?.StartBatchService(neuralBatchSize, neuralBatchTimeoutMs);
+            Console.WriteLine($"对战批量推理已启动 (batch={neuralBatchSize}, timeout={neuralBatchTimeoutMs}ms)");
+        }
 
         var results = new MatchResult[numGames];
         var aLot = new int[numGames]; var bLot = new int[numGames];
@@ -105,6 +116,10 @@ public static class MatchProgram
                 if (progressFile != null)
                     try { File.WriteAllText(progressFile, $"{done}/{numGames}"); } catch { }
             });
+
+        // 释放共享批量推理服务（所有对局已结束）
+        neuralA?.Dispose();
+        neuralB?.Dispose();
 
         int aWins = 0, aLoss = 0, draws = 0;
         int aLotT = 0, bLotT = 0;

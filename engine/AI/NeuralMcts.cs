@@ -39,6 +39,8 @@ public class NeuralMcts
 
     // 2026-09-04 GPU 线程统计（诊断用）：批数 / 样本总数 / GPU 计算累计 ticks
     internal static long StatGpuBatches, StatGpuSamples, StatGpuTicks;
+    // 2026-09-05 T1~T4 子计时器：输入构造 / session.Run / D2H(ToArray) / 拆分循环
+    internal static long StatT1, StatT2, StatT3, StatT4;
 
     // 调用方预编码后提交的请求
     private struct PredictRequest
@@ -70,11 +72,16 @@ public class NeuralMcts
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"NeuralMcts: CUDA 初始化失败: {ex.Message}");
+            Console.WriteLine($"NeuralMcts: CUDA 初始化失败 {ex.Message}");
             var opts = new SessionOptions();
             opts.IntraOpNumThreads = 1;
             session = new InferenceSession(onnxPath, opts);
             Console.WriteLine("NeuralMcts: CUDA 不可用，回退 CPU 推理（单线程）");
+            // 2026-09-05 修复（外部审查指出）：CPU 静默回退会慢 ~30 倍且不易察觉——
+            // 保留回退（不至于完全不能跑），但给出强信号：stderr 警告 + 进程退出码置 1，
+            // 面板/脚本可通过退出码发现降级。
+            Console.Error.WriteLine("[严重] NeuralMcts: 已回退 CPU 推理，速度约慢 30 倍！进程退出码已置 1。");
+            Environment.ExitCode = 1;
         }
     }
 
@@ -283,6 +290,7 @@ public class NeuralMcts
             Array.Copy(graveyards[i], 0, graveFlat, i * StateEncoder.GraveyardSize, StateEncoder.GraveyardSize);
         }
 
+        var __t = System.Diagnostics.Stopwatch.StartNew();
         var inputs = new List<NamedOnnxValue>
         {
             NamedOnnxValue.CreateFromTensor("board",
@@ -291,10 +299,17 @@ public class NeuralMcts
             NamedOnnxValue.CreateFromTensor("graveyard",
                 new DenseTensor<float>(graveFlat, new[] { batch, StateEncoder.GraveyardSize })),
         };
+        System.Threading.Interlocked.Add(ref StatT1, __t.ElapsedTicks);
+        __t.Restart();
 
         using var results = session.Run(inputs);
+        System.Threading.Interlocked.Add(ref StatT2, __t.ElapsedTicks);
+        __t.Restart();
+
         float[] policyFlat = results.First(r => r.Name == "policy").AsTensor<float>().ToArray();
         float[] values = results.First(r => r.Name == "value").AsTensor<float>().ToArray();
+        System.Threading.Interlocked.Add(ref StatT3, __t.ElapsedTicks);
+        __t.Restart();
 
         float[][] policies = new float[batch][];
         for (int i = 0; i < batch; i++)
@@ -302,6 +317,7 @@ public class NeuralMcts
             policies[i] = new float[RootActionSize];
             Array.Copy(policyFlat, i * RootActionSize, policies[i], 0, RootActionSize);
         }
+        System.Threading.Interlocked.Add(ref StatT4, __t.ElapsedTicks);
 
         return (policies, values);
     }
