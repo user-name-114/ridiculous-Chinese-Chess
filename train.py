@@ -1,5 +1,6 @@
-import json
+﻿import json
 import os
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")  # 避免 OpenMP 运行时冲突在退出时中止进程
 import sys
 import time
 import struct
@@ -392,7 +393,7 @@ def train(config, data, checkpoint_dir, resume_from=None, net_name="latest"):
                         v_leg, v_leglen, version).item()
                     vvs_ += F.mse_loss(vval.float(), vy).item()
                     vn += 1
-            v_pol, v_val = vps / max(1, vn), vvs / max(1, vn)
+            v_pol, v_val = vps / max(1, vn), vvs_ / max(1, vn)
             model.train()
             print(f"[验证] step {step + 1}: policy={v_pol:.4f} value={v_val:.4f}", flush=True)
 
@@ -438,7 +439,7 @@ def train(config, data, checkpoint_dir, resume_from=None, net_name="latest"):
                     v_leg, v_leglen, version).item()
                 vvs_ += F.mse_loss(vval.float(), vy).item()
                 vn += 1
-        v_pol, v_val = vps / max(1, vn), vvs / max(1, vn)
+        v_pol, v_val = vps / max(1, vn), vvs_ / max(1, vn)
         model.train()
         print(f"[末次验证] step {num_steps}: policy={v_pol:.4f} value={v_val:.4f}", flush=True)
         ck_path = os.path.join(checkpoint_dir, f"{net_name}_step{num_steps}.pt")
@@ -483,6 +484,15 @@ def train(config, data, checkpoint_dir, resume_from=None, net_name="latest"):
         # 无验证样本的防御路径：直接保存最终状态
         save_checkpoint(os.path.join(checkpoint_dir, f"{net_name}.pt"),
                         model, optimizer, num_steps, config)
+
+    # 需求（用户 09-08）：训练后清理中间存档——仅保留 policy 最低
+    # （【命名】.pt）与最后版本（last\\【命名】_last.pt）；ONNX 已在此前导出
+    removed = 0
+    for p in sorted(glob.glob(os.path.join(checkpoint_dir, f"{net_name}_step*.pt"))):
+        os.remove(p)
+        removed += 1
+    if removed:
+        print(f"[后处理] 已清理中间存档 {removed} 份（仅保留 policy 最低与最后版本）")
 
     # 需求 1：验证点 policy loss 折线图（保存在同一文件夹）
     if val_policy_hist:

@@ -41,7 +41,7 @@ PARAM_INFO = {
     "training.batch_size": ("批大小", "每次梯度更新用多少样本，越大越稳但更吃显存", False),
     "training.weight_decay": ("权重衰减", "L2 正则化强度，防止网络死记训练数据（过拟合）", False),
     "training.num_train_steps": ("训练步数", "每一代训练多少步，步数越多学得越充分（也更慢）", False),
-    "training.checkpoint_interval": ("验证与存档间隔", "每隔多少步做一次验证集评估，并保存一份带步数后缀的 .pt 存档；训练结束自动对比全部存档：policy 损失最低者改名为【网络名】.pt，value 损失最低者导出为【网络名】.onnx", False),
+    "training.checkpoint_interval": ("验证与存档间隔", "每隔多少步做一次验证集评估，并保存一份带步数后缀的 .pt 存档；训练结束自动对比全部存档：policy 损失最低者改名为【网络名】.pt，value 损失最低者导出为【网络名】.onnx，其余中间存档自动删除（仅额外保留最后版本于 last\\ 子文件夹）", False),
     "training.value_loss_weight": ("价值损失权重", "value 损失的乘数系数：总损失 = policy 损失 + 系数 × value 损失。系数越大越重视胜负判断，0.5 表示 value 项以一半强度参与梯度更新", False),
         "mcts.lottery_eval_limit": ("抽奖候选评估上限", "搜索内每个新抽奖结果最多评估多少个候选效果（用子力启发式而非NN，避免评估风暴；升级/生成/复活类枚举可达数百上千）。推荐8~32", False),
         "mcts.virtual_loss": ("虚拟损失", "树内并行K个worker选路时先扣的临时失败分，用于互相避让。需大于真实回报尺度(终局±1)；过大会抑制探索(抽奖饿死)、过小避让不足。推荐0.3~1.0", False),
