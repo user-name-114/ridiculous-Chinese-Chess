@@ -53,6 +53,7 @@ PARAM_INFO = {
     "selfplay.dirichlet_alpha": ("Dirichlet α", "开局探索噪声强度，越大越鼓励尝试新走法", False),
     "selfplay.dirichlet_epsilon": ("Dirichlet ε", "噪声占先验概率的比例（0~1），越大越随机", False),
     "selfplay.max_moves": ("最大步数", "单局最大步数。达到上限记和棋（value=0），终局原因日志会记录；随机初始化网络下极少触发，训练后网络变强对局可能变长", False),
+    "selfplay.min_game_samples": ("超短对局剔除阈值", "对局样本数（约等于步数）低于该值时立即删除 .bin 并记录日志——三五步就结束的对局没有学习价值。撞 200 步上限的和棋局有 200 样本不会误删；被重复判负的短局会被剔除。默认 10", False),
         "selfplay.parallel_games": ("并行局数", "同时自对弈局数。NN 指导自对弈下 CPU 几乎空闲（实测整机 ~6%，worker 基本都阻塞在等 NN），此参数不再是吞吐主杠杆：4→8 实测仅 +4~14%（在运行间噪声内），作用主要是增大攒批波次。纯 MCTS 模式（无网络）下仍受 CPU 限制，另当别论", False),
         "selfplay.mcts_threads": ("每局MCTS线程(树内并行K)", "每局搜索树内的并行worker数（虚拟损失共享树）。作用：决定并发 NN 请求数（局数×K=并发请求），从而决定实际批量大小。NN 模式下 CPU 几乎空闲，无需按逻辑核数配置；实测 8 附近即可，调大调小收益都在运行间噪声内（2026-09-07）", False),
     "selfplay.neural_batch_size": ("神经网络批量大小", "GPU 一次推理处理的局面数上限。实测批量顶满上限后再加大无收益（B≥31 进入 ms/样本平台；8×32 与 8×64 差异在噪声内）。train.py 数据集已改为 CPU 存储+按批上传（2026-09-04），显存不再是约束", False),

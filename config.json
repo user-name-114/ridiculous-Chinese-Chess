@@ -14,7 +14,7 @@
     "weight_decay": 0.0001,
     "num_train_steps": 5000,
     "checkpoint_interval": 100,
-    "value_loss_weight": 0.5,
+    "value_loss_weight": 0.1,
     "use_amp": true
   },
   "mcts": {
@@ -29,12 +29,13 @@
   "selfplay": {
     "num_games": 8,
     "dirichlet_alpha": 0.3,
-    "dirichlet_epsilon": 0.25,
+    "dirichlet_epsilon": 0.1,
     "max_moves": 200,
     "parallel_games": 4,
     "mcts_threads": 8,
     "neural_batch_size": 32,
     "neural_batch_timeout_ms": 12,
-    "match_parallel_games": 4
+    "match_parallel_games": 4,
+    "min_game_samples": 10
   }
 }

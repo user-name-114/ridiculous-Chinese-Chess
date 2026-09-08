@@ -1,4 +1,4 @@
-﻿import json
+import json
 import os
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")  # 避免 OpenMP 运行时冲突在退出时中止进程
 import sys
@@ -368,13 +368,15 @@ def train(config, data, checkpoint_dir, resume_from=None, net_name="latest"):
             with torch.no_grad():
                 tgt_ent = float(-(b_prob * b_prob.clamp_min(1e-12).log()).sum(dim=1).mean())
             print(f"step {step}/{num_steps}  loss={loss.item():.4f}  "
-                  f"policy={policy_loss.item():.4f}（目标熵{tgt_ent:.4f}）  value={value_loss.item():.4f}")
+                  f"policy={policy_loss.item():.4f}（训练目标熵{tgt_ent:.4f}）  value={value_loss.item():.4f}")
 
         # 验证集评估（每 interval 步一次，纯前向，按局划分）
         if step > 0 and step % interval == 0 and v_boards.shape[0] > 0:
             model.eval()
             vps = vvs_ = 0.0
             vn = 0
+            vent_sum = 0.0  # 验证集目标熵累计（与训练批的目标熵区分）
+            vent_n = 0
             with torch.no_grad(), torch.autocast(device_type="cuda", enabled=use_amp):
                 for vstart in range(0, v_boards.shape[0], 256):
                     vx = torch.from_numpy(v_boards[vstart:vstart + 256]).to(device)
@@ -386,16 +388,22 @@ def train(config, data, checkpoint_dir, resume_from=None, net_name="latest"):
                              if v_leg_idx_np is not None else None)
                     v_leglen = (torch.from_numpy(v_leg_len_np[vstart:vstart + 256]).to(device)
                                 if v_leg_len_np is not None else None)
+                    vprob_b = torch.from_numpy(v_pol_prob_np[vstart:vstart + 256]).to(device)
                     vps += policy_cross_entropy(
                         vpol,
                         torch.from_numpy(v_pol_idx_np[vstart:vstart + 256]).to(device),
-                        torch.from_numpy(v_pol_prob_np[vstart:vstart + 256]).to(device),
+                        vprob_b,
                         v_leg, v_leglen, version).item()
                     vvs_ += F.mse_loss(vval.float(), vy).item()
+                    # 验证集自己的目标分布熵（padding 位 prob=0 不产生贡献）
+                    vent_sum += float(-(vprob_b * vprob_b.clamp_min(1e-12).log()).sum(dim=1).sum())
+                    vent_n += vprob_b.size(0)
                     vn += 1
             v_pol, v_val = vps / max(1, vn), vvs_ / max(1, vn)
+            vent = vent_sum / max(1, vent_n)
             model.train()
-            print(f"[验证] step {step + 1}: policy={v_pol:.4f} value={v_val:.4f}", flush=True)
+            print(f"[验证] step {step + 1}: policy={v_pol:.4f} value={v_val:.4f} "
+                  f"目标熵(验证)={vent:.4f}", flush=True)
 
             # ── 需求 1/2：每个验证点保存一份带步数后缀的 .pt（命名不冲突）──
             ck_path = os.path.join(checkpoint_dir, f"{net_name}_step{step + 1}.pt")
@@ -422,6 +430,8 @@ def train(config, data, checkpoint_dir, resume_from=None, net_name="latest"):
         model.eval()
         vps = vvs_ = 0.0
         vn = 0
+        vent_sum = 0.0
+        vent_n = 0
         with torch.no_grad(), torch.autocast(device_type="cuda", enabled=use_amp):
             for vstart in range(0, v_boards.shape[0], 256):
                 vx = torch.from_numpy(v_boards[vstart:vstart + 256]).to(device)
@@ -433,16 +443,21 @@ def train(config, data, checkpoint_dir, resume_from=None, net_name="latest"):
                          if v_leg_idx_np is not None else None)
                 v_leglen = (torch.from_numpy(v_leg_len_np[vstart:vstart + 256]).to(device)
                             if v_leg_len_np is not None else None)
+                vprob_b = torch.from_numpy(v_pol_prob_np[vstart:vstart + 256]).to(device)
                 vps += policy_cross_entropy(
                     vpol,
                     torch.from_numpy(v_pol_idx_np[vstart:vstart + 256]).to(device),
-                    torch.from_numpy(v_pol_prob_np[vstart:vstart + 256]).to(device),
+                    vprob_b,
                     v_leg, v_leglen, version).item()
                 vvs_ += F.mse_loss(vval.float(), vy).item()
+                vent_sum += float(-(vprob_b * vprob_b.clamp_min(1e-12).log()).sum(dim=1).sum())
+                vent_n += vprob_b.size(0)
                 vn += 1
         v_pol, v_val = vps / max(1, vn), vvs_ / max(1, vn)
+        vent = vent_sum / max(1, vent_n)
         model.train()
-        print(f"[末次验证] step {num_steps}: policy={v_pol:.4f} value={v_val:.4f}", flush=True)
+        print(f"[末次验证] step {num_steps}: policy={v_pol:.4f} value={v_val:.4f} "
+              f"目标熵(验证)={vent:.4f}", flush=True)
         ck_path = os.path.join(checkpoint_dir, f"{net_name}_step{num_steps}.pt")
         save_checkpoint(ck_path, model, optimizer, num_steps, config,
                         val_policy_loss=v_pol, val_value_loss=v_val)
@@ -495,29 +510,36 @@ def train(config, data, checkpoint_dir, resume_from=None, net_name="latest"):
         if removed:
             print(f"[后处理] 已清理中间存档 {removed} 份（仅保留 policy 最低与最后版本）")
 
-    # 需求 1：验证点 policy loss 折线图（保存在同一文件夹）
-    if val_policy_hist:
-        try:
-            import matplotlib
-            matplotlib.use("Agg")
-            import matplotlib.pyplot as plt
-            plt.rcParams["font.sans-serif"] = ["Microsoft YaHei"]  # 中文标签可读
-            plt.rcParams["axes.unicode_minus"] = False
-            xs = [s for s, _ in val_policy_hist]
-            ys = [v for _, v in val_policy_hist]
-            fig, ax = plt.subplots(figsize=(8, 4.5))
-            ax.plot(xs, ys, marker="o", color="#1a73e8")
-            ax.set_xlabel("验证步数")
-            ax.set_ylabel("policy loss（验证集）")
-            ax.set_title(f"{net_name} 各验证点 policy loss")
-            ax.grid(True, alpha=0.4)
-            fig.tight_layout()
-            chart_path = os.path.join(checkpoint_dir, f"{net_name}_policy_loss.png")
-            fig.savefig(chart_path, dpi=120)
-            plt.close(fig)
-            print(f"[后处理] 折线图 → {chart_path}")
-        except Exception as ex:
-            print(f"[后处理] 折线图生成失败: {ex}")
+    # 需求 1：验证点 policy / value loss 折线图（保存在同一文件夹）
+    def _plot_hist(hist, fname, ylabel, title, color):
+        if not hist:
+            return
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        plt.rcParams["font.sans-serif"] = ["Microsoft YaHei"]  # 中文标签可读
+        plt.rcParams["axes.unicode_minus"] = False
+        xs = [s for s, _ in hist]
+        ys = [v for _, v in hist]
+        fig, ax = plt.subplots(figsize=(8, 4.5))
+        ax.plot(xs, ys, marker="o", color=color)
+        ax.set_xlabel("验证步数")
+        ax.set_ylabel(ylabel)
+        ax.set_title(title)
+        ax.grid(True, alpha=0.4)
+        fig.tight_layout()
+        path = os.path.join(checkpoint_dir, fname)
+        fig.savefig(path, dpi=120)
+        plt.close(fig)
+        print(f"[后处理] 折线图 → {path}")
+
+    try:
+        _plot_hist(val_policy_hist, f"{net_name}_policy_loss.png",
+                   "policy loss（验证集）", f"{net_name} 各验证点 policy loss", "#1a73e8")
+        _plot_hist(val_value_hist, f"{net_name}_value_loss.png",
+                   "value loss（验证集）", f"{net_name} 各验证点 value loss", "#e8710a")
+    except Exception as ex:
+        print(f"[后处理] 折线图生成失败: {ex}")
     print("训练完成")
 
 
