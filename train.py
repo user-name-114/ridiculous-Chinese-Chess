@@ -467,17 +467,13 @@ def train(config, data, checkpoint_dir, resume_from=None, net_name="latest"):
             os.replace(last[1], dst)
             print(f"[后处理] 最后版本（step {last[0]}）→ {dst}")
 
-        # 需求 6：仅导出 value loss 最低版本的 ONNX（按批评者要求,value 口径）
-        best_v = min(ckpts, key=lambda c: c[3])
-        if best_v[1] != final_pt:
-            src_for_onnx = best_v[1]
-        else:
-            src_for_onnx = final_pt
+        # 需求 6（2026-09-08 用户更正）：导出 policy loss 最低版本的 ONNX
+        # （与刚改名的【命名】.pt 同一份——统一口径，避免两个“最优”并存）
         try:
             from export_onnx import export as _export_onnx
             onnx_path = os.path.join(checkpoint_dir, f"{net_name}.onnx")
-            _export_onnx(src_for_onnx, onnx_path, config)
-            print(f"[后处理] value loss 最低 {best_v[3]:.4f}（step {best_v[0]}）→ {onnx_path}")
+            _export_onnx(final_pt, onnx_path, config)
+            print(f"[后处理] ONNX 导出（policy loss 最低 {best[2]:.4f}，step {best[0]}）→ {onnx_path}")
         except Exception as ex:
             print(f"[后处理] ONNX 导出失败: {ex}")
     else:
@@ -500,6 +496,8 @@ def train(config, data, checkpoint_dir, resume_from=None, net_name="latest"):
             import matplotlib
             matplotlib.use("Agg")
             import matplotlib.pyplot as plt
+            plt.rcParams["font.sans-serif"] = ["Microsoft YaHei"]  # 中文标签可读
+            plt.rcParams["axes.unicode_minus"] = False
             xs = [s for s, _ in val_policy_hist]
             ys = [v for _, v in val_policy_hist]
             fig, ax = plt.subplots(figsize=(8, 4.5))
