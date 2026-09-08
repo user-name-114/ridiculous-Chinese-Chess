@@ -101,7 +101,8 @@ if (args.Length >= 1 && args[0] == "match")
     // 对战模拟数固定等于全局 mcts.num_mcts_sims（公平性要求）
     MatchProgram.Run(matchGames, net1, net2, mcts2spec, matchOutDir, numSims, mctsThreads,
         maxMoves, cpuct, matchParallel, matchProgress, matchPrepare,
-        evalMaterialWeight, virtualLossValue, lotteryEvalLimit, matchPauseFlag);
+        evalMaterialWeight, virtualLossValue, lotteryEvalLimit, matchPauseFlag,
+        neuralBatchSize, neuralBatchTimeoutMs);
     return;
 }
 
