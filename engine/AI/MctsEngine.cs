@@ -3,16 +3,16 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 
 // ====================================================================
-// 支持两种抽奖处理方式：
-//   Scheme A — lotteryCMultiplier > 1: 抽奖在 UCB 中获得更高探索权重
-//   Scheme B — useLotteryChanceNodes: 抽奖作为 ChanceNode，
-//             随机采样 outcome，渐进展开（Progressive Widening）
+// 支持两种抽奖处理方式:
+//   Scheme A - lotteryCMultiplier > 1: 抽奖在 UCB 中获得更高探索权重
+//   Scheme B - useLotteryChanceNodes: 抽奖作为 ChanceNode,
+//             随机采样 outcome,渐进展开(Progressive Widening)
 //
-// 并行化：
-//   threadCount > 1 时启用根并行化——多线程各跑独立树，最后合并。
-//   推荐设为 CPU 逻辑核心数，默认 16。
+// 并行化:
+//   threadCount > 1 时启用根并行化--多线程各跑独立树,最后合并。
+//   推荐设为 CPU 逻辑核心数,默认 16。
 //
-// 用法：
+// 用法:
 //   var engine = new MctsEngine(simulations: 1000, C: 1.2,
 //       useLotteryChanceNodes: true, threadCount: 16);
 //   GameAction best = engine.FindBestAction(state, rng);
@@ -33,7 +33,7 @@ public sealed class RepetitionTracker
         AddState(state);
     }
 
-    /// <summary>创建一份快照（深拷贝 counts 和 recent），供 MCTS 模拟继承真实对局历史</summary>
+    /// <summary>创建一份快照(深拷贝 counts 和 recent),供 MCTS 模拟继承真实对局历史</summary>
     public RepetitionTracker Clone()
     {
         var clone = new RepetitionTracker();
@@ -45,20 +45,20 @@ public sealed class RepetitionTracker
         return clone;
     }
 
-    /// <summary>添加一个状态，返回该状态在窗口内是否已出现 3 次（第 3 次时返回 true）。
-    /// isLottery=true 时不计入重复检测（抽奖不可控，不应因运气不好判负）</summary>
+    /// <summary>添加一个状态,返回该状态在窗口内是否已出现 3 次(第 3 次时返回 true)。
+    /// isLottery=true 时不计入重复检测(抽奖不可控,不应因运气不好判负)</summary>
     public bool AddState(Gamestate state, bool isLottery = false)
     {
         long key = MctsEngine.RepetitionKey(state);
         if (!isLottery)
             AddKey(key);
         else
-            // 抽奖仍滑动窗口（移除过期条目），但不增加计数
+            // 抽奖仍滑动窗口(移除过期条目),但不增加计数
             AddKeyLottery(key);
         return !isLottery && counts.TryGetValue(key, out int c) && c >= 3;
     }
 
-    /// <summary>检查如果添加这个状态，是否会构成第 3 次重复（不实际添加）</summary>
+    /// <summary>检查如果添加这个状态,是否会构成第 3 次重复(不实际添加)</summary>
     public bool WouldRepeat(Gamestate state)
     {
         long key = MctsEngine.RepetitionKey(state);
@@ -82,7 +82,7 @@ public sealed class RepetitionTracker
         }
     }
 
-    /// <summary>抽奖走法：滑动窗口但不增加重复计数</summary>
+    /// <summary>抽奖走法:滑动窗口但不增加重复计数</summary>
     private void AddKeyLottery(long key)
     {
         ply++;
@@ -111,14 +111,14 @@ public class MctsEngine
     private bool useLotteryChanceNodes;
     private int threadCount;
     private NeuralMcts neural;
-    private double dirichletAlpha;    // Dirichlet 噪声浓度（>0 时根节点加噪声，鼓励探索）
+    private double dirichletAlpha;    // Dirichlet 噪声浓度(>0 时根节点加噪声,鼓励探索)
     private double dirichletEpsilon;  // 噪声混合比例
 
-    // ── 诊断计数器（静态，跨引擎实例共享；ResetStats 后按次读取差值）──
+    // ── 诊断计数器(静态,跨引擎实例共享;ResetStats 后按次读取差值)──
     internal static long StatRollouts, StatRolloutTerm, StatSweeps, StatSweepCand, StatChanceSel, StatNewPairs;
     internal static long StatPhaseCloneDescend, StatPhaseNN, StatPhaseRoll, StatPhaseExpandBack;
     internal static long StatPhaseExpandPre, StatPhaseExpandLock, StatPhaseWorkerWall;
-    // 2026-09-04 起全部计时器改 ElapsedTicks 累计（消除 (long)ms 截断），读取时 /Stopwatch.Frequency*1000
+    // 2026-09-04 起全部计时器改 ElapsedTicks 累计(消除 (long)ms 截断),读取时 /Stopwatch.Frequency*1000
     internal static void ResetStats() { StatRollouts = StatRolloutTerm = StatSweeps = StatSweepCand = StatChanceSel = StatNewPairs = 0; StatPhaseCloneDescend = StatPhaseNN = StatPhaseRoll = StatPhaseExpandBack = StatPhaseExpandPre = StatPhaseExpandLock = StatPhaseWorkerWall = 0; }
 
     private double evalMaterialWeight;
@@ -153,21 +153,21 @@ public class MctsEngine
     //  公共接口
     // ================================================================
 
-    /// <summary>在给定 state 上运行 MCTS，返回最优行动（visitCount 最大）</summary>
+    /// <summary>在给定 state 上运行 MCTS,返回最优行动(visitCount 最大)</summary>
     public GameAction FindBestAction(Gamestate state, System.Random rng)
     {
         MctsNode root = RunMcts(state, rng);
         return BestChild(root);
     }
 
-    /// <summary>运行 MCTS（带真实对局历史），返回最优行动</summary>
+    /// <summary>运行 MCTS(带真实对局历史),返回最优行动</summary>
     public GameAction FindBestAction(Gamestate state, System.Random rng, RepetitionTracker history)
     {
         MctsNode root = RunMcts(state, rng, history);
         return BestChild(root);
     }
 
-    /// <summary>运行 MCTS，返回根节点各行动的概率分布（visitCount 归一化）</summary>
+    /// <summary>运行 MCTS,返回根节点各行动的概率分布(visitCount 归一化)</summary>
     public List<(GameAction action, double probability)> GetActionDistribution(
         Gamestate state, System.Random rng)
     {
@@ -175,20 +175,20 @@ public class MctsEngine
         return BuildDistribution(root);
     }
 
-    /// <summary>运行 MCTS（带真实对局历史），返回概率分布</summary>
+    /// <summary>运行 MCTS(带真实对局历史),返回概率分布</summary>
     public List<(GameAction action, double probability)> GetActionDistribution(
         Gamestate state, System.Random rng, RepetitionTracker history)
     {
         MctsNode root = RunMcts(state, rng, history);
         if (root.visitCount == 0)
         {
-            // 所有模拟都被剪枝，回退到无历史搜索
+            // 所有模拟都被剪枝,回退到无历史搜索
             return GetActionDistribution(state, rng);
         }
         return BuildDistribution(root);
     }
 
-    /// <summary>从根节点构建概率分布，过滤掉 pruned 子节点</summary>
+    /// <summary>从根节点构建概率分布,过滤掉 pruned 子节点</summary>
     private List<(GameAction action, double probability)> BuildDistribution(MctsNode root)
     {
         var dist = new List<(GameAction action, double probability)>();
@@ -208,8 +208,8 @@ public class MctsEngine
     }
 
     /// <summary>
-    /// 【诊断专用】返回根节点每个子动作的统计信息（含被 pruned 的），
-    /// 用于排查“抽奖从未被选中”这类问题。不改变任何搜索行为。
+    /// 【诊断专用】返回根节点每个子动作的统计信息(含被 pruned 的),
+    /// 用于排查"抽奖从未被选中"这类问题。不改变任何搜索行为。
     /// Q 为执行该动作一方视角的均值。
     /// </summary>
     public List<(GameAction action, string desc, bool isChance,
@@ -247,14 +247,14 @@ public class MctsEngine
     /// <summary>
     /// MCTS 主循环。
     /// threadCount==1: 单线程顺序执行。
-    /// threadCount>1:  根并行化——多线程各跑独立树，最后合并根的子节点统计数据。
+    /// threadCount>1:  根并行化--多线程各跑独立树,最后合并根的子节点统计数据。
     /// </summary>
     private MctsNode RunMcts(Gamestate state, System.Random rng)
     {
         return RunMcts(state, rng, null);
     }
 
-    /// <summary>根并行化 MCTS，支持传入真实对局历史。</summary>
+    /// <summary>根并行化 MCTS,支持传入真实对局历史。</summary>
     private MctsNode RunMcts(Gamestate state, System.Random rng, RepetitionTracker history)
     {
         if (threadCount <= 1)
@@ -279,9 +279,9 @@ public class MctsEngine
 
         int per = maxSimulations / threads;
         int rem = maxSimulations % threads;
-        // 专用线程而非 ThreadPool：避免嵌套并行下的线程注入延迟，
-        // 确保 K 个 worker 真正同时进入 NN 等待（提高批量密度与 GPU 占用）。
-        // virtual loss 补偿机制保证统计口径与串行一致，不影响棋力。
+        // 专用线程而非 ThreadPool:避免嵌套并行下的线程注入延迟,
+        // 确保 K 个 worker 真正同时进入 NN 等待(提高批量密度与 GPU 占用)。
+        // virtual loss 补偿机制保证统计口径与串行一致,不影响棋力。
         var handles = new System.Threading.Thread[threads];
         for (int w = 0; w < threads; w++)
         {
@@ -300,14 +300,14 @@ public class MctsEngine
     }
 
     /// <summary>
-    /// 单个 worker 执行一次完整模拟。虚拟损失在选择经过每条边时立即扣减，
-    /// BackpropAggregate 回传时补偿并累加真实结果 —— 统计口径与串行一致。
+    /// 单个 worker 执行一次完整模拟。虚拟损失在选择经过每条边时立即扣减,
+    /// BackpropAggregate 回传时补偿并累加真实结果 -- 统计口径与串行一致。
     /// </summary>
     private void WorkerSim(MctsNode root, Gamestate rootState,
         RepetitionTracker history, System.Random wr)
     {
-        var simRepeatSkip = new HashSet<MctsNode>();   // worker 本地临时跳过集，不写共享节点（2026-09-04 修复）
-        var __wall = System.Diagnostics.Stopwatch.StartNew();   // 整个 WorkerSim（单次模拟）总墙钟
+        var simRepeatSkip = new HashSet<MctsNode>();   // worker 本地临时跳过集,不写共享节点(2026-09-04 修复)
+        var __wall = System.Diagnostics.Stopwatch.StartNew();   // 整个 WorkerSim(单次模拟)总墙钟
         try
         {
             var __ph = System.Diagnostics.Stopwatch.StartNew();
@@ -321,17 +321,17 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
             {
                 if (IsTerminal(ws)) break;               // 树中途撞上终局
 
-                // ── ChanceNode：采样 outcome，锁内确保唯一创建 ──
+                // ── ChanceNode:采样 outcome,锁内确保唯一创建 ──
                                 if (node.IsChanceNode)
                 {
                     int outcome = wr.Next(1, 41);
                     ((LotteryAction)node.action).lastOutcome = outcome;
 
-                    // ── 方案①（2026-09-04 修复）：候选枚举与评估移出临界区 ──
-                    // 第一段锁只查字典；未命中时在锁外完成 O(n²) 候选枚举与
-                    // SelectLotteryChoiceByValue 评估（仅依赖 worker 私有 ws，无共享状态），
-                    // 再进第二段短锁二次检查并建节点。并发未命中时可能重复计算，
-                    // 先建者胜、后者复用已建节点（仅浪费计算，无正确性影响）。
+                    // ── 方案1(2026-09-04 修复):候选枚举与评估移出临界区 ──
+                    // 第一段锁只查字典;未命中时在锁外完成 O(n2) 候选枚举与
+                    // SelectLotteryChoiceByValue 评估(仅依赖 worker 私有 ws,无共享状态),
+                    // 再进第二段短锁二次检查并建节点。并发未命中时可能重复计算,
+                    // 先建者胜、后者复用已建节点(仅浪费计算,无正确性影响)。
                     MctsNode oc = null;
                     bool miss = false;
                     LotteryChoice preFc = null;
@@ -350,7 +350,7 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
                             preFc = chs[wr.Next(chs.Count)];
                         else
                         {
-                            // 候选可能成百上千（双生成炮马类目标对）：全量评估会造成评估风暴，超限等距抽样
+                            // 候选可能成百上千(双生成炮马类目标对):全量评估会造成评估风暴,超限等距抽样
                             chs = SampleChoices(chs, lotteryEvalLimit, wr);
                             preFc = SelectLotteryChoiceByValue(ws, outcome, chs);
                         }
@@ -376,9 +376,9 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
                     node = oc;
                     continue;
                 }
-                
 
-                // ── 普通 / 叶判定与选路（统计变更段加锁）──
+
+                // ── 普通 / 叶判定与选路(统计变更段加锁)──
                 bool reachedLeaf = false;
                 bool exhausted = false;
                 MctsNode nextNode = null;
@@ -417,7 +417,7 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
                             ExecuteAction(ts, child.action, wr);
                             if (trk.WouldRepeat(ts))
                             {
-                                                                simRepeatSkip.Add(child); // 仅本 sim 本地跳过（2026-09-04 修复）
+                                                                simRepeatSkip.Add(child); // 仅本 sim 本地跳过(2026-09-04 修复)
                                 continue;
                             }
                             child.visitCount++;
@@ -437,14 +437,14 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
 
                 if (pendingChance != null) { continue; }  // 执行交由下一轮 Chance 分支
 
-                ExecuteAction(ws, pendingEdge, wr);       // 普通边确认执行（锁外）
+                ExecuteAction(ws, pendingEdge, wr);       // 普通边确认执行(锁外)
                 trk.AddState(ws, false);
                 _ = nextNode;                              // node 已在锁内前移
             }
 
             System.Threading.Interlocked.Add(ref StatPhaseCloneDescend, __ph.ElapsedTicks);
             __ph.Restart();
-            // ── 叶评估（全部在锁外）──
+            // ── 叶评估(全部在锁外)──
             double result;
             float[] priors = null;
             int priorsOffset = 0;
@@ -468,9 +468,9 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
                 System.Threading.Interlocked.Add(ref StatPhaseRoll, __rl.ElapsedTicks);
             }
 
-            // 展开（若刚才到达的是未展开叶；存在竞态时幂等跳过）
+            // 展开(若刚才到达的是未展开叶;存在竞态时幂等跳过)
             var __ex = System.Diagnostics.Stopwatch.StartNew();
-            Gamestate expandState = ws.DeepClone();   // 修复(位置已核正)：快照=叶子原局面（Select 之后）
+            Gamestate expandState = ws.DeepClone();   // 修复(位置已核正):快照=叶子原局面(Select 之后)
             long __exPre = __ex.ElapsedTicks;
             System.Threading.Interlocked.Add(ref StatPhaseExpandPre, __exPre);
             if (!IsTerminal(expandState) && leafFound != null && leafFound.children.Count == 0)
@@ -499,25 +499,25 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
     }
 
     /// <summary>
-    /// 回传（并行版，2026-09-04 重写）：①补偿路径上所有虚拟损失（含叶自身）；
-    /// ②按串行一致的翻转规则自叶向上逐动作节点翻转并累加一次真实结果——
-    /// 叶节点 visitCount 已在 descend 选边时计入，本方法仅给根节点 visitCount+1
-    /// （保持 PUCT parentVisits 口径与串行版一致）。
+    /// 回传(并行版,2026-09-04 重写):1补偿路径上所有虚拟损失(含叶自身);
+    /// 2按串行一致的翻转规则自叶向上逐动作节点翻转并累加一次真实结果--
+    /// 叶节点 visitCount 已在 descend 选边时计入,本方法仅给根节点 visitCount+1
+    /// (保持 PUCT parentVisits 口径与串行版一致)。
     /// </summary>
         private void BackpropAggregate(List<MctsNode> path, MctsNode leaf,
         double result, MctsNode root)
     {
         lock (_treeLock)
         {
-            // 修复（2026-09-03，外部代码审查确认）：旧实现把 leaf 单独处理了一遍——
+            // 修复(2026-09-03,外部代码审查确认):旧实现把 leaf 单独处理了一遍--
             //   leaf.visitCount 二次自增、totalValue 被 -result/+result 抵消、
-            //   整条链多翻转一次导致所有祖先符号反转。改为与串行 Backpropagate 对齐：
-            //   descend 时已计入 visitCount/-VL，此处只补偿 VL 并沿 path 逐动作翻转累加一次。
+            //   整条链多翻转一次导致所有祖先符号反转。改为与串行 Backpropagate 对齐:
+            //   descend 时已计入 visitCount/-VL,此处只补偿 VL 并沿 path 逐动作翻转累加一次。
             foreach (var n in path)
-                n.totalValue += virtualLossValue;         // 补偿选择期的 -VL（含叶节点自身）
+                n.totalValue += virtualLossValue;         // 补偿选择期的 -VL(含叶节点自身)
 
             double r = result;
-            for (int i = path.Count - 1; i >= 0; i--)     // 逆序：末位即叶节点
+            for (int i = path.Count - 1; i >= 0; i--)     // 逆序:末位即叶节点
             {
                 var n = path[i];
                 if (n.action != null) r = -r;
@@ -525,17 +525,17 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
             }
 
             root.visitCount++;
-            root.totalValue += r;                          // root.action == null，不翻转
+            root.totalValue += r;                          // root.action == null,不翻转
         }
     }
 
-/// <summary>单线程 MCTS（可指定模拟次数，供并行版调用）</summary>
+/// <summary>单线程 MCTS(可指定模拟次数,供并行版调用)</summary>
     private MctsNode RunMctsSingle(Gamestate state, System.Random rng, int? simsOverride = null)
     {
         return RunMctsSingle(state, rng, simsOverride, null);
     }
 
-    /// <summary>单线程 MCTS，可传入真实对局历史用于重复检测</summary>
+    /// <summary>单线程 MCTS,可传入真实对局历史用于重复检测</summary>
     private MctsNode RunMctsSingle(Gamestate state, System.Random rng, int? simsOverride,
         RepetitionTracker realHistory)
     {
@@ -544,7 +544,7 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
 
         int validSims = 0;
         int attempts = 0;
-        int maxAttempts = sims * 3; // 安全阀：防止极端情况下无限循环
+        int maxAttempts = sims * 3; // 安全阀:防止极端情况下无限循环
         while (validSims < sims && attempts < maxAttempts)
         {
             attempts++;
@@ -553,7 +553,7 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
             catch (Exception ex)
             { throw new Exception($"DeepClone failed at sim {validSims}: {ex.Message}", ex); }
 
-            // 每次模拟克隆一份真实历史，从根节点重新遍历
+            // 每次模拟克隆一份真实历史,从根节点重新遍历
             RepetitionTracker simTracker = realHistory?.Clone() ?? new RepetitionTracker();
             var prunedThisSelect = new List<MctsNode>();
 
@@ -563,13 +563,13 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
             { throw new Exception($"Select failed at sim {validSims}: {ex.Message}", ex); }
             finally
             {
-                // 异常安全清除临时剪枝标记（重复剪枝只在单次模拟内有效）；
-                // 与“合法性失败”的永久标记区分开，防止临时标记泄漏成永久剪枝
+                // 异常安全清除临时剪枝标记(重复剪枝只在单次模拟内有效);
+                // 与"合法性失败"的永久标记区分开,防止临时标记泄漏成永久剪枝
                 foreach (var n in prunedThisSelect)
                     n.pruned = false;
             }
 
-            // leaf == null 表示该模拟因所有走法被剪枝而无法继续，不计入有效次数
+            // leaf == null 表示该模拟因所有走法被剪枝而无法继续,不计入有效次数
             if (leaf == null)
                 continue;
 
@@ -588,7 +588,7 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
                     priors = p;
                     priorsOffset = pOff;
                     result = v;
-                    // 网络 value 是固定红方视角，转成叶节点玩家视角（黑方时取反）
+                    // 网络 value 是固定红方视角,转成叶节点玩家视角(黑方时取反)
                     if (workState.currentTeam == -1)
                         result = -result;
                 }
@@ -598,12 +598,12 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
             catch (Exception ex)
             { throw new Exception($"Simulate failed at sim {validSims}: {ex.Message}", ex); }
 
-            // 展开叶节点（策略网络先验或均匀先验）；ChanceNode 不在此展开（由 HandleChanceNode 管理）
-            Gamestate expandState = workState.DeepClone();   // 修复(位置已核正)：快照=叶子原局面（Select 之后）
+            // 展开叶节点(策略网络先验或均匀先验);ChanceNode 不在此展开(由 HandleChanceNode 管理)
+            Gamestate expandState = workState.DeepClone();   // 修复(位置已核正):快照=叶子原局面(Select 之后)
             if (!IsTerminal(expandState) && leaf.children.Count == 0 && !leaf.IsChanceNode)
             {
                 ExpandAll(leaf, expandState, priors, priorsOffset);
-                // 根节点加 Dirichlet 噪声（AlphaZero 探索，仅自对弈时 dirichletAlpha>0）
+                // 根节点加 Dirichlet 噪声(AlphaZero 探索,仅自对弈时 dirichletAlpha>0)
                 if (leaf == root && dirichletAlpha > 0 && dirichletEpsilon > 0)
                     AddDirichletNoise(root, rng);
             }
@@ -615,13 +615,13 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
     }
 
     // ================================================================
-    //  Select — 沿树向下遍历直到叶节点
+    //  Select - 沿树向下遍历直到叶节点
     //
-    //  重复检测采用剪枝而非惩罚：
-    //    执行一个非抽奖动作后，检查新局面是否构成第 3 次重复。
-    //    如果是，标记该子节点为 pruned（PUCT 不再选择），回退 state，
-    //    重新选择其他子节点。所有子节点都被剪枝时返回 null（跳过本次模拟）。
-    //    抽奖动作（含未中奖和无效抽奖）豁免剪枝——抽不出好结果无可厚非。
+    //  重复检测采用剪枝而非惩罚:
+    //    执行一个非抽奖动作后,检查新局面是否构成第 3 次重复。
+    //    如果是,标记该子节点为 pruned(PUCT 不再选择),回退 state,
+    //    重新选择其他子节点。所有子节点都被剪枝时返回 null(跳过本次模拟)。
+    //    抽奖动作(含未中奖和无效抽奖)豁免剪枝--抽不出好结果无可厚非。
     // ================================================================
 
     private MctsNode Select(MctsNode node, Gamestate state, System.Random rng,
@@ -629,23 +629,23 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
     {
         while (!IsTerminal(state))
         {
-            // ── ChanceNode: 随机采样 outcome，创建子节点，继续深入 ──
+            // ── ChanceNode: 随机采样 outcome,创建子节点,继续深入 ──
             if (node.IsChanceNode)
             {
-                // HandleChanceNode 采样 outcome、执行（固化 choice 重放）并返回 outcome 子节点。
-                // 抽奖的执行只发生在这里；Select 的“确认执行”段必须跳过 ChanceNode，
-                // 否则会叠加执行两次抽奖效果（历史重大 bug）
+                // HandleChanceNode 采样 outcome、执行(固化 choice 重放)并返回 outcome 子节点。
+                // 抽奖的执行只发生在这里;Select 的"确认执行"段必须跳过 ChanceNode,
+                // 否则会叠加执行两次抽奖效果(历史重大 bug)
                 node = HandleChanceNode(node, state, rng, repetitionTracker);
                 continue;
             }
 
-            // ── 未展开（叶节点）→ 返回，交给 RunMctsSingle 展开 + 评估 ──
+            // ── 未展开(叶节点)→ 返回,交给 RunMctsSingle 展开 + 评估 ──
             if (node.children.Count == 0)
                 return node;
 
             // ── PUCT 选择最优子节点 ──
-            // 重复检测：实时检查 WouldRepeat，不永久标记 pruned。
-            // 同一节点在不同模拟路径中重复条件不同，永久标记会导致错误剪枝。
+            // 重复检测:实时检查 WouldRepeat,不永久标记 pruned。
+            // 同一节点在不同模拟路径中重复条件不同,永久标记会导致错误剪枝。
             MctsNode child = null;
             while (true)
             {
@@ -653,24 +653,24 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
                 if (child == null)
                     return null; // 所有走法都不可用
 
-                // 抽奖子节点不检查重复，直接使用
+                // 抽奖子节点不检查重复,直接使用
                 if (child.IsChanceNode)
                     break;
 
-                // 普通节点：校验合法性
+                // 普通节点:校验合法性
                 if (!IsActionValid(child.action, state))
                 {
-                    child.pruned = true; // 合法性失败是永久的（棋子已移动/冻结等）
+                    child.pruned = true; // 合法性失败是永久的(棋子已移动/冻结等)
                     continue;
                 }
 
-                // 检查重复：试走，看是否构成第 3 次重复
+                // 检查重复:试走,看是否构成第 3 次重复
                 Gamestate testState = state.DeepClone();
                 ExecuteAction(testState, child.action, rng);
                 if (repetitionTracker.WouldRepeat(testState))
                 {
-                    // 本次模拟中此走法会导致重复，跳过（不永久标记）
-                    // 用临时标记让 BestPuctChild 跳过，本次模拟结束后清除
+                    // 本次模拟中此走法会导致重复,跳过(不永久标记)
+                    // 用临时标记让 BestPuctChild 跳过,本次模拟结束后清除
                     child.pruned = true;
                     prunedThisSelect.Add(child);
                     continue;
@@ -679,9 +679,9 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
                 break; // 找到合法且不重复的子节点
             }
 
-            // 确认执行：推进真实 state 和 tracker。
-            // 注意：ChanceNode（抽奖）子节点不在此执行——
-            // 它的执行（含重复豁免计数）由 HandleChanceNode 统一负责，
+            // 确认执行:推进真实 state 和 tracker。
+            // 注意:ChanceNode(抽奖)子节点不在此执行--
+            // 它的执行(含重复豁免计数)由 HandleChanceNode 统一负责,
             // 这里若执行会造成双重抽奖效果叠加
             if (!child.IsChanceNode)
             {
@@ -696,13 +696,13 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
     }
 
     // ================================================================
-    //  HandleChanceNode — Scheme B 抽奖随机节点
+    //  HandleChanceNode - Scheme B 抽奖随机节点
     //
-    //  均匀随机采样 outcome (1~40)，执行效果，推进 state。
-    //  outcome 子节点按需懒创建（每个 ChanceNode 至多 40 个），
-    //  首建时固化本 outcome 实际执行的 LotteryChoice，重放时原样复现，
+    //  均匀随机采样 outcome (1~40),执行效果,推进 state。
+    //  outcome 子节点按需懒创建(每个 ChanceNode 至多 40 个),
+    //  首建时固化本 outcome 实际执行的 LotteryChoice,重放时原样复现,
     //  保证同一 outcome 子节点永远对应同一个具体局面序列。
-    //  返回 outcome 子节点（继续深入）。
+    //  返回 outcome 子节点(继续深入)。
     // ================================================================
 
     private MctsNode HandleChanceNode(MctsNode node, Gamestate state, System.Random rng,
@@ -718,23 +718,23 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
 
         if (!node.outcomeChildren.TryGetValue(outcome, out MctsNode oc))
         {
-            // 新建 outcome 子节点：确定并固化本次实际执行的 LotteryChoice。
-            // 纯 MCTS 下 choice 选择带随机性；此后每次经过该子节点必须原样重放，
-            // 否则同一子节点对应不同具体局面，破坏子树状态一致性（历史 bug 根源）
+            // 新建 outcome 子节点:确定并固化本次实际执行的 LotteryChoice。
+            // 纯 MCTS 下 choice 选择带随机性;此后每次经过该子节点必须原样重放,
+            // 否则同一子节点对应不同具体局面,破坏子树状态一致性(历史 bug 根源)
             List<LotteryChoice> choices = LotteryResolver.GetChoices(state, outcome);
-            // 候选可能成百上千（双生成枚举目标对）：全量评估会造成评估风暴，超限等距抽样
-            // ── 已知问题（2026-09-04 外部审查核实，按约定注释搁置）──
-            // 问题：纯 MCTS（neural == null）且走串行路径（threadCount <= 1）时，本方法
-            // 先随机无放回抽样到 lotteryEvalLimit 再随机取一个，候选分布是"抽样子集内均匀"；
-            // 并行版 WorkerSim 的对应分支则是全量随机（不抽样）。两版行为不等价，
+            // 候选可能成百上千(双生成枚举目标对):全量评估会造成评估风暴,超限等距抽样
+            // ── 已知问题(2026-09-04 外部审查核实,按约定注释搁置)──
+            // 问题:纯 MCTS(neural == null)且走串行路径(threadCount <= 1)时,本方法
+            // 先随机无放回抽样到 lotteryEvalLimit 再随机取一个,候选分布是"抽样子集内均匀";
+            // 并行版 WorkerSim 的对应分支则是全量随机(不抽样)。两版行为不等价,
             // 且此处对纯随机选择而言抽样步骤是纯浪费。
-            // 搁置原因：① 当前训练与对局均走神经网络模式，纯 MCTS + 串行路径基本不用；
-            // ② 修复需先统一三处口径（本方法 / WorkerSim / ExecuteLotteryOutcome），
-            //    单改此处会制造新的不一致；③ 收益低、回归风险高。
+            // 搁置原因:1 当前训练与对局均走神经网络模式,纯 MCTS + 串行路径基本不用;
+            // 2 修复需先统一三处口径(本方法 / WorkerSim / ExecuteLotteryOutcome),
+            //    单改此处会制造新的不一致;3 收益低、回归风险高。
             choices = SampleChoices(choices, lotteryEvalLimit, rng);
             LotteryChoice fixedChoice;
             if (choices.Count == 0)
-                fixedChoice = null; // 无可选目标，交给 Resolver 的自动路径
+                fixedChoice = null; // 无可选目标,交给 Resolver 的自动路径
             else
                 fixedChoice = neural == null
                     ? choices[rng.Next(choices.Count)]
@@ -744,13 +744,13 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
             node.outcomeChildren[outcome] = oc;
         }
 
-        // 执行效果（重放固化的 choice 或自动路径）+ 回合切换。
-        // 注意此处不再每次到达重新随机选 choice —— 修复纯 MCTS 下
+        // 执行效果(重放固化的 choice 或自动路径)+ 回合切换。
+        // 注意此处不再每次到达重新随机选 choice -- 修复纯 MCTS 下
         // 同一 outcome 子节点对应不同具体局面的问题
         LotteryResolver.ResolveChoice(state, outcome, oc.fixedChoice);
         GameAction.EndTurn(state);
 
-        // 抽奖豁免重复检测——不剪枝、不判负
+        // 抽奖豁免重复检测--不剪枝、不判负
         repetitionTracker.AddState(state, isLottery: true);
 
         return oc;
@@ -772,9 +772,9 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
             return;
         }
 
-        // 修复（2026-09-04，批评确认）：与搜索树内候选逻辑对齐——神经网络模式下
-        // 同样等距抽样到 lotteryEvalLimit，保证树内固化的 choice 与真实执行
-        // 产生自同一候选集；同时消除真实对局数百次 DeepClone+评估的阻塞。
+        // 修复(2026-09-04,批评确认):与搜索树内候选逻辑对齐--神经网络模式下
+        // 同样等距抽样到 lotteryEvalLimit,保证树内固化的 choice 与真实执行
+        // 产生自同一候选集;同时消除真实对局数百次 DeepClone+评估的阻塞。
         if (neural != null)
             choices = SampleChoices(choices, lotteryEvalLimit, rng);
 
@@ -788,7 +788,7 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
     /// 候选效果选择：用 F1 子力差启发式静态评估（选使对手局面最差的效果）。
     /// 【性能关键】不再调用神经网络——此函数在搜索内部高频触发，
     /// 旧版直连 session.Run 与批量流水线争抢 GPU，是 44s/步 的主要阻塞源。
-    /// F1 材料差对"生成/升级类"效果是足够好的短期代理；长期价值仍由
+    /// F1 材料差对“生成/升级类”效果是足够好的短期代理；长期价值仍由
     /// 主搜索的 outcome 子树统计学习。
     /// </summary>
     private LotteryChoice SelectLotteryChoiceByValue(Gamestate state, int outcome,
@@ -822,15 +822,15 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
     }
 
     // ================================================================
-    //  Expand — 从当前状态未尝试的行动中随机取一个创建子节点
+    //  Expand - 从当前状态未尝试的行动中随机取一个创建子节点
     //
-    //  Scheme B 下 LotteryAction 创建为 ChanceNode，不在此执行
-    //  （由 HandleChanceNode 负责执行）。
+    //  Scheme B 下 LotteryAction 创建为 ChanceNode,不在此执行
+    //  (由 HandleChanceNode 负责执行)。
     // ================================================================
 
     /// <summary>
-    /// 一次性展开叶节点的所有合法行动（AlphaZero 式），每个子节点用策略网络
-    /// 的先验概率 P(s,a) 初始化（纯 MCTS 时用均匀先验）。动作在此不执行，
+    /// 一次性展开叶节点的所有合法行动(AlphaZero 式),每个子节点用策略网络
+    /// 的先验概率 P(s,a) 初始化(纯 MCTS 时用均匀先验)。动作在此不执行,
     /// 由 Select 在遍历时执行。
     /// </summary>
     private void ExpandAll(MctsNode node, Gamestate state, float[] rootPolicy, int policyOffset)
@@ -870,7 +870,7 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
         }
     }
 
-    /// <summary>根节点先验加 Dirichlet 噪声：P' = (1-ε)P + ε·Dir(α)，鼓励探索</summary>
+    /// <summary>根节点先验加 Dirichlet 噪声:P' = (1-ε)P + ε·Dir(α),鼓励探索</summary>
     private void AddDirichletNoise(MctsNode root, System.Random rng)
     {
         int n = root.children.Count;
@@ -881,7 +881,7 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
                                      + dirichletEpsilon * noise[i];
     }
 
-    /// <summary>采样 Dirichlet(α, ..., α) 分布（n 个分量，和为 1）</summary>
+    /// <summary>采样 Dirichlet(α, ..., α) 分布(n 个分量,和为 1)</summary>
     private static double[] SampleDirichlet(double alpha, int n, System.Random rng)
     {
         double[] g = new double[n];
@@ -895,7 +895,7 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
         return g;
     }
 
-    /// <summary>采样 Gamma(shape=α, scale=1)，支持 α&lt;1（Dirichlet 常用 α&lt;1）</summary>
+    /// <summary>采样 Gamma(shape=α, scale=1),支持 α&lt;1(Dirichlet 常用 α&lt;1)</summary>
     private static double GammaSample(double alpha, System.Random rng)
     {
         if (alpha >= 1.0)
@@ -934,7 +934,7 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
     }
 
     // ================================================================
-    //  Simulate — 从当前状态随机走子到终局（rollout）
+    //  Simulate - 从当前状态随机走子到终局(rollout)
     // ================================================================
 
     private double Simulate(Gamestate state, System.Random rng)
@@ -948,19 +948,19 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
                 return Evaluate(state);
             }
 
-            // 轻量随机走子（不创建 GameAction 对象，避免 GC 压力）
+            // 轻量随机走子(不创建 GameAction 对象,避免 GC 压力)
             if (!LightRandomMove(state, rng))
                 break;
         }
 
-        // F1：未分胜负时不再返回死平的 0，改用子力差启发式给搜索梯度
+        // F1:未分胜负时不再返回死平的 0,改用子力差启发式给搜索梯度
         return EvalMaterialHeuristic(state);
     }
 
     /// <summary>
-    /// 轻量随机走子：随机选一个己方棋子，随机选它的一个合法走法，直接执行。
-    /// 不枚举所有走法、不创建 GameAction 对象，避免海量短命对象导致 GC 串行化。
-    /// 只走普通棋（忽略抽奖/狙击，rollout 纯随机近似足够）。
+    /// 轻量随机走子:随机选一个己方棋子,随机选它的一个合法走法,直接执行。
+    /// 不枚举所有走法、不创建 GameAction 对象,避免海量短命对象导致 GC 串行化。
+    /// 只走普通棋(忽略抽奖/狙击,rollout 纯随机近似足够)。
     /// </summary>
     private bool LightRandomMove(Gamestate state, System.Random rng)
     {
@@ -968,7 +968,7 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
         int xMin = state.leftBound, xMax = state.rightBound;
         int yMin = state.lowerBound, yMax = state.upperBound;
 
-        // 随机选一个己方棋子（最多尝试 8 次）
+        // 随机选一个己方棋子(最多尝试 8 次)
         for (int attempt = 0; attempt < 8; attempt++)
         {
             int px = rng.Next(xMin, xMax + 1);
@@ -977,9 +977,9 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
             if (piece.type == PieceType.Empty || piece.thisTeam != team || piece.frozenTurns > 0)
                 continue;
 
-    // 【甲·战术化】随机选一个合法目标（最多尝试 8 次）：
-    // 命中吃子立即优先执行（含吃王 → 真实终局 ±1 信号）；
-    // 安静着法先记住，未命中吃子时才兜底执行。
+    // 【甲·战术化】随机选一个合法目标(最多尝试 8 次):
+    // 命中吃子立即优先执行(含吃王 → 真实终局 ±1 信号);
+    // 安静着法先记住,未命中吃子时才兜底执行。
             int quietTx = -1, quietTy = -1;
             for (int attempt2 = 0; attempt2 < 8; attempt2++)
             {
@@ -991,7 +991,7 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
                 Piece target = state[tx, ty];
                 if (target.type != PieceType.Empty)
                 {
-                    // 吃子：立即执行，不与安静着法同权竞争
+                    // 吃子:立即执行,不与安静着法同权竞争
                     piece.Move(tx, ty, state);
                     if (target.isDead)
                         state.AddToGraveyard(target);
@@ -1015,10 +1015,10 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
     }
 
     // ================================================================
-    //  Backpropagate — 模拟结果沿路径回传
+    //  Backpropagate - 模拟结果沿路径回传
     //
-    //  零和博弈：经过一个已执行的动作节点时翻转 value 视角。
-    //  outcome 子节点没有 action，不额外翻转；其父 ChanceNode 代表抽奖动作，
+    //  零和博弈:经过一个已执行的动作节点时翻转 value 视角。
+    //  outcome 子节点没有 action,不额外翻转;其父 ChanceNode 代表抽奖动作,
     //  会像普通动作一样完成一次视角转换。
     // ================================================================
 
@@ -1026,8 +1026,8 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
     {
         while (node != null)
         {
-            // 叶节点 value 属于动作执行后的当前行动方；动作节点需要先转换
-            // 回执行该动作一方的视角，再写入自身统计值。
+            // 叶节点 value 属于动作执行后的当前行动方;动作节点需要先转换
+            // 回执行该动作一方的视角,再写入自身统计值。
             if (node.action != null)
                 result = -result;
 
@@ -1045,7 +1045,7 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
     private List<GameAction> GetFilteredActions(Gamestate state)
     {
         var actions = ActionGenerator.GetAllActions(state, state.currentTeam);
-        // 准备模式下不检查 allowLottery（强制抽奖）
+        // 准备模式下不检查 allowLottery(强制抽奖)
         if (!allowLottery && state.currentTeam == aiTeam && !state.prepareModeOn)
             actions.RemoveAll(a => a is LotteryAction);
         return actions;
@@ -1055,7 +1055,7 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
     {
         if (action is MoveAction m)
         {
-            // 边界检查：action 坐标可能在搜索树持久化期间因领域展开/收缩而失效
+            // 边界检查:action 坐标可能在搜索树持久化期间因领域展开/收缩而失效
             if (!state.IsValidPosition(m.fromX, m.fromY) || !state.IsValidPosition(m.toX, m.toY))
                 return false;
             Piece piece = state[m.fromX, m.fromY];
@@ -1088,7 +1088,7 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
         return a.GetDescription();
     }
 
-    /// <summary>把 GameAction 映射到策略头输出的根节点 logits 索引（0~24332）</summary>
+    /// <summary>把 GameAction 映射到策略头输出的根节点 logits 索引(0~24332)</summary>
     private static int ActionToIndex(GameAction a)
     {
         if (a is MoveAction m)
@@ -1121,9 +1121,9 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
     }
 
     /// <summary>
-    /// 【F1·非终局启发式】按子力价值差给出连续信号，修复纯MCTS“全零价值塌缩”。
-    /// 仅影响 rollout 走满/中断时的兑底估值；终局仍由 Evaluate 精确判定。
-    /// 输出压在 [-w,+w]，真实终局 ±1 永远占主导；权重可由面板参数调节。
+    /// 【F1·非终局启发式】按子力价值差给出连续信号,修复纯MCTS"全零价值塌缩"。
+    /// 仅影响 rollout 走满/中断时的兑底估值;终局仍由 Evaluate 精确判定。
+    /// 输出压在 [-w,+w],真实终局 ±1 永远占主导;权重可由面板参数调节。
     /// </summary>
     private double EvalMaterialHeuristic(Gamestate state)
     {
@@ -1143,9 +1143,9 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
     }
 
     /// <summary>
-    /// 棋子强度点数表（F1）——按玩家实战体验排序标定，名称↔等级对照
+    /// 棋子强度点数表(F1)--按玩家实战体验排序标定,名称↔等级对照
     /// 以 RuleEngine.cs 的 GetDescription 为准。
-    /// 将/墙/空格不计入：将死由 Evaluate 判定，墙是临时物。
+    /// 将/墙/空格不计入:将死由 Evaluate 判定,墙是临时物。
     /// </summary>
     private static double PieceStrengthPoints(Piece p)
     {
@@ -1158,7 +1158,7 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
                 {
                     case 1: return 11.0;                           // 炮车
                     case 2: return 10.5;                           // 迫击炮
-                    case 3: return 15.5;                           // 迫击炮车（炮车+迫击炮叠加）
+                    case 3: return 15.5;                           // 迫击炮车(炮车+迫击炮叠加)
                     default: return 6.2;                           // 炮
                 }
             case PieceType.Knight:
@@ -1195,7 +1195,7 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
         return false;
     }
 
-    /// <summary>完整局面哈希，用于重复检测</summary>
+    /// <summary>完整局面哈希,用于重复检测</summary>
     public static long StateHash(Gamestate state)
     {
         unchecked
@@ -1271,7 +1271,7 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
         AddHash(ref hash, value ? 1 : 0);
     }
 
-    /// <summary>重复检测键：完整局面哈希（已包含当前行动方）</summary>
+    /// <summary>重复检测键:完整局面哈希(已包含当前行动方)</summary>
     public static long RepetitionKey(Gamestate state)
     {
         return StateHash(state);
@@ -1282,13 +1282,13 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
     // ================================================================
 
     /// <summary>PUCT 选择子节点。Scheme A 下 LotteryAction 使用更高的 C。
-    /// F2：完全平手时随机破序，消除动作枚举顺序导致的结构性饿死
-    /// （抽奖是枚举末位，在零值世界里会被系统性跳过）。</summary>
+    /// F2:完全平手时随机破序,消除动作枚举顺序导致的结构性饿死
+    /// (抽奖是枚举末位,在零值世界里会被系统性跳过)。</summary>
     /// <summary>
-    /// 无放回均匀抽样（Fisher-Yates 部分洗牌取前 k 个）。
-    /// 修复（2026-09-04，批评确认）：双生成类候选由 for i, for j>i 嵌套循环生成，
-    /// 索引→(i,j) 映射不均匀（小 i 的 pair 密集、大 i 稀疏），原按索引等距取样
-    /// 会系统性偏向列表前段；改为随机无放回抽样后所有候选等概率进入评估子集。
+    /// 无放回均匀抽样(Fisher-Yates 部分洗牌取前 k 个)。
+    /// 修复(2026-09-04,批评确认):双生成类候选由 for i, for j>i 嵌套循环生成,
+    /// 索引→(i,j) 映射不均匀(小 i 的 pair 密集、大 i 稀疏),原按索引等距取样
+    /// 会系统性偏向列表前段;改为随机无放回抽样后所有候选等概率进入评估子集。
     /// </summary>
     private static List<LotteryChoice> SampleChoices(List<LotteryChoice> chs, int k, System.Random rng)
     {
@@ -1352,7 +1352,7 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
     }
 
     // ================================================================
-    //  模拟策略：吃子优先（权重 3），其他均等
+    //  模拟策略:吃子优先(权重 3),其他均等
     // ================================================================
 
     private static GameAction HeuristicPick(List<GameAction> actions,

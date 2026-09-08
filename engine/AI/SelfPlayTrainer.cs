@@ -126,6 +126,7 @@ public static class SelfPlayTrainer
         var boards = new List<float[]>();
         var graves = new List<float[]>();
         var policies = new List<(int[] indices, float[] probs)>();
+        var legalPerSample = new List<int[]>(); // 2026-09-08 掩码 v2：每决策点的合法动作索引
 
         int winner = 0;
         var repetitionTracker = new RepetitionTracker(state);
@@ -139,6 +140,7 @@ public static class SelfPlayTrainer
             if (MctsEngine.IsTerminal(state))
             {
                 winner = -state.currentTeam; // 当前方被将死，对方胜
+                Console.WriteLine($"[Game {gameIdx}] 终局=吃将 胜方={(winner == 1 ? "红" : "黑")} 步数={move}");
                 break;
             }
 
@@ -148,6 +150,18 @@ public static class SelfPlayTrainer
             // 编码当前状态
             boards.Add(StateEncoder.Encode(state));
             graves.Add(StateEncoder.EncodeGraveyard(state));
+
+            // 2026-09-08（掩码 v2）：记录当前状态合法动作索引，供训练侧
+            // masked softmax 使用。与 GetFilteredActions 同源（自对弈配置
+            // allowLottery=true、prepareModeOn=false → 逐字等价），
+            // 已由 diag_mask 工具在 817 个决策点实证 target ⊆ legal。
+            var legalIdx = new List<int>();
+            foreach (var a in ActionGenerator.GetAllActions(state, state.currentTeam))
+            {
+                int li = EncodeActionForTraining(a);
+                if (li >= 0) legalIdx.Add(li);
+            }
+            legalPerSample.Add(legalIdx.ToArray());
 
             // 获取 MCTS 动作分布（传入真实对局历史，让 MCTS 感知重复局面）
             var dist = ai.GetActionDistribution(state, repetitionTracker);
@@ -168,14 +182,19 @@ public static class SelfPlayTrainer
             // 温度采样走子：前 tempThreshold 步用温度 τ 随机，之后贪心
             double temp = (move < tempThreshold) ? temperature : 0.01;
             GameAction best = SampleActionByTemperature(dist, temp, rng);
-            if (best == null) break;
+            if (best == null)
+            {
+                Console.WriteLine($"[Game {gameIdx}] 终局=无可用动作 胜方=红 步数={move}");
+                break;
+            }
             ai.ExecuteAction(state, best);
 
             // 对局级重复检测：同一局面出现第 3 次，判"刚走的一方"负（抽奖豁免）
             bool isLottery = best is LotteryAction;
             if (repetitionTracker.AddState(state, isLottery))
             {
-                Console.WriteLine($"[Game {gameIdx}] 重复判负！步数={move} 走法={best.GetDescription()} isLottery={isLottery}");
+                winner = state.currentTeam; // 刚走的一方判负，对手胜
+                Console.WriteLine($"[Game {gameIdx}] 终局=重复判负 胜方={(winner == 1 ? "红" : "黑")} 步数={move} 走法={best.GetDescription()} isLottery={isLottery}");
                 // 打印 MCTS 输出的分布，看是否包含会导致重复的走法
                 foreach (var (a, p) in dist)
                     Console.WriteLine($"  动作={a.GetDescription()} 概率={p:F4}");
@@ -184,9 +203,15 @@ public static class SelfPlayTrainer
             }
         }
 
-        if (winner == 0) winner = 1; // 达最大步数，按红方胜处理（罕见）
+        if (winner == 0)
+        {
+            // 2026-09-07（第五轮批评 P0-2）：撞步数上限记和棋（value=0），
+            // 不再写死红胜。这是训练协议选择（游戏本体无步数上限），
+            // 消除方向性标签偏置；终局原因日志同步记录。
+            Console.WriteLine($"[Game {gameIdx}] 终局=撞步数上限 和棋 步数={move}");
+        }
 
-        WriteData(dataDir, gameIdx, boards, graves, policies, winner);
+        WriteData(dataDir, gameIdx, boards, graves, policies, legalPerSample, winner);
         return move;
     }
 
@@ -239,19 +264,25 @@ public static class SelfPlayTrainer
     //  [int32] num_samples
     //  [int32] board_feature_size (3388)
     //  [int32] graveyard_size (18)
-    //  每个样本：
+    //  [int32] version（2；v1 无此字段——v1 首样本 board 首浮点恒 0.0，
+    //          其 int 位模式为 0，可安全探测）
+    //  每个样本（v2）：
     //    [float32 × 3388] board
     //    [float32 × 18]   graveyard
-    //    [int32] num_actions
-    //    [int32 × num_actions] indices
-    //    [float32 × num_actions] probs
-    //    [float32] value
+    //    [int32] nLegal + [int32 × nLegal] legalIdx（合法动作索引，掩码用）
+    //    [int32] nTarget + [int32 × nTarget] targetPos（目标在 legalIdx 中的位置）
+    //    [float32 × nTarget] probs
+    //    [float32] value（红方视角，0=和棋）
+    //  目标位置化：训练侧 masked softmax 直接按位置 gather，
+    //  与旧格式稀疏 idx/prob 同构；target ⊆ legal 已由
+    //  diag_mask 在 817 决策点实证。
     // ================================================================
     private static void WriteData(string dataDir, int gameIdx,
         List<float[]> boards, List<float[]> graves,
-        List<(int[] indices, float[] probs)> policies, int winner)
+        List<(int[] indices, float[] probs)> policies,
+        List<int[]> legalPerSample, int winner)
     {
-        float value = winner == 1 ? 1f : -1f; // 红方视角
+        float value = winner == 1 ? 1f : (winner == -1 ? -1f : 0f); // 红方视角（0=和棋）
 
         string path = Path.Combine(dataDir, $"game_{gameIdx:D4}.bin");
         using (var fs = new FileStream(path, FileMode.Create))
@@ -260,16 +291,30 @@ public static class SelfPlayTrainer
             w.Write(boards.Count);
             w.Write(StateEncoder.FeatureSize);
             w.Write(StateEncoder.GraveyardSize);
+            w.Write(2); // 格式版本：v2 = 含合法动作掩码
 
             for (int i = 0; i < boards.Count; i++)
             {
                 foreach (float v in boards[i]) w.Write(v);
                 foreach (float v in graves[i]) w.Write(v);
 
-                int na = policies[i].indices.Length;
-                w.Write(na);
-                foreach (int idx in policies[i].indices) w.Write(idx);
-                foreach (float p in policies[i].probs) w.Write(p);
+                // 合法动作索引（掩码集合，与 GetFilteredActions 同源）
+                int[] legal = legalPerSample[i];
+                w.Write(legal.Length);
+                foreach (int idx in legal) w.Write(idx);
+
+                // 目标对齐：动作索引 → 合法列表内位置（防御：未命中跳过）
+                var src = policies[i];
+                var posList = new List<int>(src.indices.Length);
+                var probList = new List<float>(src.indices.Length);
+                for (int k = 0; k < src.indices.Length; k++)
+                {
+                    int pos = Array.IndexOf(legal, src.indices[k]);
+                    if (pos >= 0) { posList.Add(pos); probList.Add(src.probs[k]); }
+                }
+                w.Write(posList.Count);
+                foreach (int pos in posList) w.Write(pos);
+                foreach (float p in probList) w.Write(p);
 
                 w.Write(value);
             }
