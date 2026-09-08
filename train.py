@@ -411,7 +411,8 @@ def train(config, data, checkpoint_dir, resume_from=None, net_name="latest"):
                 first_val_value = v_val
             elif first_val_value < 1.0 and v_val > 1.0:
                 print(f"[早停] 首次验证 value loss {first_val_value:.4f} < 1，"
-                      f"当前 {v_val:.4f} > 1 → 终止训练，保留最后版本")
+                      f"当前 {v_val:.4f} > 1 → 终止训练"
+                      "（由后处理自动保留 policy 损失最低与最后版本）")
                 early_stopped = True
                 break
 
@@ -469,26 +470,30 @@ def train(config, data, checkpoint_dir, resume_from=None, net_name="latest"):
 
         # 需求 6（2026-09-08 用户更正）：导出 policy loss 最低版本的 ONNX
         # （与刚改名的【命名】.pt 同一份——统一口径，避免两个“最优”并存）
+        onnx_ok = False
         try:
             from export_onnx import export as _export_onnx
             onnx_path = os.path.join(checkpoint_dir, f"{net_name}.onnx")
             _export_onnx(final_pt, onnx_path, config)
+            onnx_ok = True
             print(f"[后处理] ONNX 导出（policy loss 最低 {best[2]:.4f}，step {best[0]}）→ {onnx_path}")
         except Exception as ex:
-            print(f"[后处理] ONNX 导出失败: {ex}")
+            print(f"[后处理] ONNX 导出失败: {ex}（保留全部中间 .pt 存档，可用面板【导出】按钮手动导出 ONNX）")
     else:
         # 无验证样本的防御路径：直接保存最终状态
+        onnx_ok = False
         save_checkpoint(os.path.join(checkpoint_dir, f"{net_name}.pt"),
                         model, optimizer, num_steps, config)
 
-    # 需求（用户 09-08）：训练后清理中间存档——仅保留 policy 最低
-    # （【命名】.pt）与最后版本（last\\【命名】_last.pt）；ONNX 已在此前导出
-    removed = 0
-    for p in sorted(glob.glob(os.path.join(checkpoint_dir, f"{net_name}_step*.pt"))):
-        os.remove(p)
-        removed += 1
-    if removed:
-        print(f"[后处理] 已清理中间存档 {removed} 份（仅保留 policy 最低与最后版本）")
+    # 需求（用户 09-08）：清理中间存档——仅当 ONNX 导出成功；
+    # 导出失败时保留全部 _step .pt，仍可手动导出 ONNX
+    if onnx_ok:
+        removed = 0
+        for p in sorted(glob.glob(os.path.join(checkpoint_dir, f"{net_name}_step*.pt"))):
+            os.remove(p)
+            removed += 1
+        if removed:
+            print(f"[后处理] 已清理中间存档 {removed} 份（仅保留 policy 最低与最后版本）")
 
     # 需求 1：验证点 policy loss 折线图（保存在同一文件夹）
     if val_policy_hist:
