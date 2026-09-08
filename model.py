@@ -47,9 +47,16 @@ class ResBlock(nn.Module):
 
 
 class ChessNet(nn.Module):
-    def __init__(self, num_blocks=8, channels=128, move_emb=64):
+    def __init__(self, num_blocks=8, channels=128, move_emb=64, value_tap=None):
         super().__init__()
         self.channels = channels
+        # 价值头接管位置：第 value_tap 个残差块后（1~num_blocks）。
+        # None/超界 → 接在最后一个残差块后（原始行为）。
+        # 策略头永远接在全部残差块后；改小 value_tap 可缓解价值头过拟合。
+        if value_tap is None:
+            self.value_tap = num_blocks
+        else:
+            self.value_tap = max(1, min(int(value_tap), num_blocks))
 
         # ── 输入卷积 ──
         self.conv_input = nn.Conv2d(INPUT_CH, channels, 3, padding=1, bias=False)
@@ -89,8 +96,13 @@ class ChessNet(nn.Module):
 
         # ── 共享特征 ──
         shared = F.relu(self.bn_input(self.conv_input(x)))
-        for block in self.res_blocks:
+        value_feat = None
+        for bi, block in enumerate(self.res_blocks, start=1):
             shared = block(shared)
+            if bi == self.value_tap:
+                value_feat = shared          # 价值头从第 value_tap 个残差块后接管
+        if value_feat is None:
+            value_feat = shared               # 防御：value_tap ≥ 块数时用最终特征
 
         # ── 移动头（双线性）──
         from_emb = self.move_from_conv(shared).flatten(2)          # (B, d, 154)
@@ -108,7 +120,7 @@ class ChessNet(nn.Module):
         lottery = self.lottery_fc(torch.cat([pooled, graveyard], dim=1))  # (B, 1)
 
         # ── 价值头 ──
-        v = F.relu(self.value_bn(self.value_conv(shared)))          # (B, 1, 14, 11)
+        v = F.relu(self.value_bn(self.value_conv(value_feat)))       # (B, 1, 14, 11)
         v = v.flatten(1)                                            # (B, 154)
         v = torch.tanh(self.value_fc(v.flatten(1)))  # (B, 1)（墓地不再进价值头；仅抽奖头使用，见注释）
 

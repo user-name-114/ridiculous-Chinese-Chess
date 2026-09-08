@@ -45,7 +45,8 @@ def main():
     torch.manual_seed(seed)
     random.seed(seed)
     np.random.seed(seed % (2 ** 32))
-    net = ChessNet(num_blocks=cfg["num_residual_blocks"], channels=cfg["channels"])
+    net = ChessNet(num_blocks=cfg["num_residual_blocks"], channels=cfg["channels"],
+                   value_tap=cfg.get("value_tap_block"))
 
     os.makedirs(out_dir, exist_ok=True)
     pt_path = os.path.join(out_dir, name + ".pt")

@@ -2,27 +2,28 @@
   "network": {
     "num_residual_blocks": 8,
     "channels": 128,
+    "value_tap_block": 8,
     "board_height": 14,
     "board_width": 11,
     "input_channels": 22,
     "graveyard_size": 18
   },
   "training": {
-    "learning_rate": 0.0001,
+    "learning_rate": 0.0003,
     "batch_size": 256,
     "weight_decay": 0.0001,
-    "num_train_steps": 8000,
-    "checkpoint_interval": 200,
-    "value_loss_weight": 1.0,
+    "num_train_steps": 2000,
+    "checkpoint_interval": 100,
+    "value_loss_weight": 0.5,
     "use_amp": true
   },
   "mcts": {
-    "num_mcts_sims": 600,
-    "cpuct": 1.2,
-    "temperature": 0.9,
+    "num_mcts_sims": 900,
+    "cpuct": 1.25,
+    "temperature": 1.0,
     "temp_threshold": 20,
     "virtual_loss": 0.5,
-    "lottery_eval_limit": 20,
+    "lottery_eval_limit": 25,
     "eval_material_weight": 0.15
   },
   "selfplay": {

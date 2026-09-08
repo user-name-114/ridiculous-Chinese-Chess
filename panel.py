@@ -35,27 +35,28 @@ FONT_TITLE = ("Microsoft YaHei", 14, "bold")
 # 超参数说明（路径 → (中文名, 说明, 是否结构类)）
 PARAM_INFO = {
     "network.num_residual_blocks": ("残差块数", "网络层数，越深能学越复杂的棋型，但训练更慢、数据少时易过拟合", True),
+    "network.value_tap_block": ("value连接层", "价值头从第 N 个残差块后接管（1~残差块数，填与残差块数相同则接在最后）。策略头仍接在全部残差块后；改小可缓解价值头过拟合。改动需重新训练", True),
     "network.channels": ("特征通道数", "每层卷积的特征通道数，越大网络越宽、表达力越强，但更慢更易过拟合", True),
     "training.learning_rate": ("学习率", "梯度更新步长，太大震荡、太小收敛慢", False),
     "training.batch_size": ("批大小", "每次梯度更新用多少样本，越大越稳但更吃显存", False),
     "training.weight_decay": ("权重衰减", "L2 正则化强度，防止网络死记训练数据（过拟合）", False),
     "training.num_train_steps": ("训练步数", "每一代训练多少步，步数越多学得越充分（也更慢）", False),
-    "training.checkpoint_interval": ("存档间隔", "每隔多少步保存一次模型存档，中断后可恢复", False),
-    "training.value_loss_weight": ("价值损失权重", "价值头损失占总损失的比重，越大越重视胜负判断", False),
+    "training.checkpoint_interval": ("验证与存档间隔", "每隔多少步做一次验证集评估，并保存一份带步数后缀的 .pt 存档；训练结束自动对比全部存档：policy 损失最低者改名为【网络名】.pt，value 损失最低者导出为【网络名】.onnx", False),
+    "training.value_loss_weight": ("价值损失权重", "value 损失的乘数系数：总损失 = policy 损失 + 系数 × value 损失。系数越大越重视胜负判断，0.5 表示 value 项以一半强度参与梯度更新", False),
         "mcts.lottery_eval_limit": ("抽奖候选评估上限", "搜索内每个新抽奖结果最多评估多少个候选效果（用子力启发式而非NN，避免评估风暴；升级/生成/复活类枚举可达数百上千）。推荐8~32", False),
-        "mcts.virtual_loss": ("虚拟损失", "树内并行K个worker选路时先扣的临时失败分，用于互相避让。需大于真实回报尺度(终局±1)；过大会抑制探索(抽奖饿死)、过小避让不足。推荐0.3~1.0，当前0.5", False),
-        "mcts.num_mcts_sims": ("MCTS 模拟次数", "自对弈与对战共用的每步模拟数（对战双方相同才公平，已统一由此参数控制）。150~300 更快、600 更强——当前 config 即 600；注意吞吐随 sims 线性下降", False),
+        "mcts.virtual_loss": ("虚拟损失", "树内并行K个worker选路时先扣的临时失败分，用于互相避让。需大于真实回报尺度(终局±1)；过大会抑制探索(抽奖饿死)、过小避让不足。推荐0.3~1.0", False),
+        "mcts.num_mcts_sims": ("MCTS 模拟次数", "自对弈与对战共用的每步模拟数（对战双方相同才公平，已统一由此参数控制）。150~300 更快、600 更强；吞吐随 sims 线性下降", False),
         "mcts.eval_material_weight": ("评估子力权重", "两处用途：①纯MCTS的rollout未分胜负时按子力差给连续估值；②抽奖候选效果选择时的静态评估。输出压在±权重内。推荐0.1~0.2；设0=关闭", False),
     "mcts.cpuct": ("探索常数", "越大越爱尝试新走法（探索），越小越走当前最优（利用）", False),
     "mcts.temperature": ("温度", "走子随机程度：越高越随机，1=按概率采样，0=总选概率最高", False),
     "mcts.temp_threshold": ("温度阈值", "前多少步用温度随机采样，之后贪心选最优", False),
     "selfplay.dirichlet_alpha": ("Dirichlet α", "开局探索噪声强度，越大越鼓励尝试新走法", False),
     "selfplay.dirichlet_epsilon": ("Dirichlet ε", "噪声占先验概率的比例（0~1），越大越随机", False),
-    "selfplay.max_moves": ("最大步数", "单局最大步数。达到上限时按红方胜计入训练价值（代码写死 winner=1，不是判和）；600 sims 下极少触发", False),
+    "selfplay.max_moves": ("最大步数", "单局最大步数。达到上限记和棋（value=0），终局原因日志会记录；随机初始化网络下极少触发，训练后网络变强对局可能变长", False),
         "selfplay.parallel_games": ("并行局数", "同时自对弈局数。NN 指导自对弈下 CPU 几乎空闲（实测整机 ~6%，worker 基本都阻塞在等 NN），此参数不再是吞吐主杠杆：4→8 实测仅 +4~14%（在运行间噪声内），作用主要是增大攒批波次。纯 MCTS 模式（无网络）下仍受 CPU 限制，另当别论", False),
         "selfplay.mcts_threads": ("每局MCTS线程(树内并行K)", "每局搜索树内的并行worker数（虚拟损失共享树）。作用：决定并发 NN 请求数（局数×K=并发请求），从而决定实际批量大小。NN 模式下 CPU 几乎空闲，无需按逻辑核数配置；实测 8 附近即可，调大调小收益都在运行间噪声内（2026-09-07）", False),
     "selfplay.neural_batch_size": ("神经网络批量大小", "GPU 一次推理处理的局面数上限。实测批量顶满上限后再加大无收益（B≥31 进入 ms/样本平台；8×32 与 8×64 差异在噪声内）。train.py 数据集已改为 CPU 存储+按批上传（2026-09-04），显存不再是约束", False),
-    "selfplay.neural_batch_timeout_ms": ("批量超时(ms)", "攒批最长等待毫秒数。2026-09-07 实测最大杠杆：3→12 使 req/s 中位 +108~137%（批量从 18.7 顶满 32 上限），且 N=8 seed 配对检验证明对搜索语义零影响。太小会把请求流切碎成小批（当时 pg6 比 pg4 更差的根因）；当前 config=12 勿调回小值", False),
+    "selfplay.neural_batch_timeout_ms": ("批量超时(ms)", "攒批最长等待毫秒数。实测最大杠杆：3→12 使 req/s 中位 +108~137%（批量从 18.7 顶满 32 上限），且 N=8 seed 配对检验证明对搜索语义零影响。太小会把请求流切碎成小批，显著降吞吐", False),
     "selfplay.match_parallel_games": ("对战并行局数", "同时进行多少局对战。NN 模式下 CPU 非瓶颈（实测 ~6%），主要影响批量密度；推荐 4~8。对战模拟数强制等于全局 mcts.num_mcts_sims（公平性）", False),
     "training.use_amp": ("混合精度(fp16)", "训练用AMP：卷积等重算子在fp16加速，BN/softmax自动保持fp32，GradScaler防下溢。实测提速约1.5~2倍；若遇NaN先关此项排查", False),
 }
@@ -63,7 +64,7 @@ PARAM_INFO = {
 
 PARAM_GROUPS = [
     ("网络结构（改动需从头训练）",
-     ["network.num_residual_blocks", "network.channels"]),
+     ["network.num_residual_blocks", "network.value_tap_block", "network.channels"]),
     ("训练",
      ["training.learning_rate", "training.batch_size", "training.weight_decay",
       "training.num_train_steps", "training.checkpoint_interval",
@@ -262,6 +263,9 @@ class Panel:
         self.view_btn = tk.Button(btns, text="查看", width=8, font=FONT,
                                   command=self.on_view)
         self.view_btn.pack(side="left", padx=5)
+        self.export_btn = tk.Button(btns, text="导出", width=8, font=FONT,
+                                    command=self.on_pick_export)
+        self.export_btn.pack(side="left", padx=5)
 
         # 进度条1：数据收集（按局数）
         p1 = tk.Frame(f)
@@ -738,6 +742,13 @@ class Panel:
     def on_start(self):
         if self.state not in ("ready", "finished"):
             return
+
+        # 需求 9：导出模式——已通过【导出】选择 .pt 时，【开始】改为导出 ONNX
+        export_pt = getattr(self, "_export_pt", None)
+        if export_pt:
+            self._run_export(export_pt)
+            return
+
         try:
             self.target_games = int(self.games_var.get())
         except ValueError:
@@ -811,6 +822,45 @@ class Panel:
         else:
             self.log(f"开始第 {self.generation} 代训练，目标 {self.target_games} 局（纯 MCTS 自对弈）")
         self.update_buttons()
+
+    def on_pick_export(self):
+        """需求 9：选择 .pt 文件；选中后点击【开始】即导出 ONNX。"""
+        if self.state not in ("ready", "finished"):
+            messagebox.showinfo("提示", "请先结束当前任务再导出")
+            return
+        pt = filedialog.askopenfilename(
+            title="选择要导出的 .pt 文件",
+            filetypes=[("PyTorch 存档", "*.pt"), ("所有文件", "*.*")])
+        if not pt:
+            return
+        self._export_pt = pt
+        self.log(f"已选择 {os.path.basename(pt)}，点击【开始】导出 ONNX（保存在 .pt 原文件夹）")
+
+    def _run_export(self, pt_path):
+        """根据选中的 .pt 生成 ONNX（保存在 .pt 原文件夹）；日志只进信息框，不落文件。"""
+        self._export_pt = None
+        onnx_out = os.path.join(
+            os.path.dirname(pt_path),
+            os.path.splitext(os.path.basename(pt_path))[0] + ".onnx")
+        self.log(f"导出 ONNX：{os.path.basename(pt_path)} → {os.path.basename(onnx_out)} …")
+        self.set_status("导出 ONNX 中", "#1a73e8")
+
+        def worker():
+            try:
+                r = subprocess.run(
+                    [PYTHON_EXE, EXPORT_ONNX_PY, pt_path, onnx_out],
+                    cwd=BASE_DIR, capture_output=True, text=True,
+                    creationflags=subprocess.CREATE_NO_WINDOW
+                    if hasattr(subprocess, "CREATE_NO_WINDOW") else 0)
+                ok = r.returncode == 0 and os.path.exists(onnx_out)
+                msg = "导出成功" if ok else "导出失败：" + (r.stderr or r.stdout or "").strip()[-300:]
+            except Exception as e:
+                ok = False
+                msg = f"导出失败：{e}"
+            self.log(msg)
+            self.set_status("就绪" if ok else "导出失败", "#188038" if ok else "#d93025")
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def on_random_init(self):
         r"""生成随机初始化网络（AlphaZero 式冷启动）：自定义名称输出到 results/<时间戳>_init/。"""
@@ -1030,15 +1080,21 @@ class Panel:
             pt_path = os.path.join(self.data_dir, f"{net_name}.pt")
             if os.path.exists(pt_path):
                 onnx_out = os.path.join(self.data_dir, f"{net_name}.onnx")
-                self.log("导出 ONNX 模型供下一代自对弈…")
-                export_ok = self._export_onnx(pt_path, onnx_out)
-                self._resume_pt = pt_path
-                if export_ok and os.path.exists(onnx_out):
+                if os.path.exists(onnx_out):
+                    # train.py 后处理已按 value 损失最低版本导出 ONNX，不重复导出
+                    self.log("ONNX 已由训练后处理生成（value 损失最低版本），跳过重复导出")
+                    self._resume_pt = pt_path
                     self._resume_onnx = onnx_out
-                    self.log("ONNX 导出成功，下一代将用网络指导自对弈")
                 else:
-                    self._resume_onnx = None
-                    self.log(f"ONNX 导出失败：未生成 {os.path.basename(onnx_out)}，下一代将退回纯 MCTS")
+                    self.log("导出 ONNX 模型供下一代自对弈…")
+                    export_ok = self._export_onnx(pt_path, onnx_out)
+                    self._resume_pt = pt_path
+                    if export_ok and os.path.exists(onnx_out):
+                        self._resume_onnx = onnx_out
+                        self.log("ONNX 导出成功，下一代将用网络指导自对弈")
+                    else:
+                        self._resume_onnx = None
+                        self.log(f"ONNX 导出失败：未生成 {os.path.basename(onnx_out)}，下一代将退回纯 MCTS")
             else:
                 self.log(f"找不到训练输出 {os.path.basename(pt_path)}，跳过 ONNX 导出")
             self.generation += 1

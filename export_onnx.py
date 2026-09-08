@@ -32,6 +32,7 @@ def export(checkpoint_path, onnx_path, config):
     model = ChessNet(
         num_blocks=net_cfg["num_residual_blocks"],
         channels=net_cfg["channels"],
+        value_tap=net_cfg.get("value_tap_block"),
     )
     ckpt = torch.load(checkpoint_path, map_location="cpu")
     model.load_state_dict(ckpt["model_state_dict"])
