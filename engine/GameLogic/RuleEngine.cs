@@ -830,7 +830,8 @@ public class Pawn : Piece
             if (!state.IsValidPosition(nx, ny)) continue;
 
             Piece target = state[nx, ny];
-            if (target.type == PieceType.Empty) continue; // 墙不可摧毁
+            if (target.type == PieceType.Empty || target.type == PieceType.Wall)
+                continue; // 空格跳过；墙不可摧毁(2026-09-09 修复:原只排除 Empty,墙被误炸)
             if (friendlyFire == 0 && target.thisTeam == thisTeam) continue; // 友伤关闭时不炸友军
 
             // 击杀目标
