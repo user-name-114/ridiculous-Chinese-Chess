@@ -44,6 +44,7 @@ PARAM_INFO = {
     "training.checkpoint_interval": ("验证与存档间隔", "每隔多少步做一次验证集评估，并保存一份带步数后缀的 .pt 存档；训练结束自动对比全部存档：policy 损失最低者改名为【网络名】.pt，导出为【网络名】.onnx，其余中间存档自动删除（仅额外保留最后版本于 last\\ 子文件夹）", False),
     "training.value_loss_weight": ("价值损失权重", "value 损失的乘数系数：总损失 = policy 损失 + 系数 × value 损失。系数越大越重视胜负判断，0.5 表示 value 项以一半强度参与梯度更新", False),
         "mcts.lottery_eval_limit": ("抽奖候选评估上限", "搜索内每个新抽奖结果最多评估多少个候选效果（用子力启发式而非NN，避免评估风暴；升级/生成/复活类枚举可达数百上千）。推荐8~32", False),
+    "mcts.lottery_nn_eval": ("抽奖候选NN评估", "true=候选效果应用后编码，塞进网络批量队列与主搜索合批评估value选最优（当前启用）；false=子力差启发式。2026-09-09 实测：样本产出率 −9.0%（+15% 线内），DeepClone 占比 0.3%，详见 exp_probe/抽奖NN评估v2对比报告.txt", False),
         "mcts.virtual_loss": ("虚拟损失", "树内并行K个worker选路时先扣的临时失败分，用于互相避让。需大于真实回报尺度(终局±1)；过大会抑制探索(抽奖饿死)、过小避让不足。推荐0.3~1.0", False),
         "mcts.num_mcts_sims": ("MCTS 模拟次数", "自对弈与对战共用的每步模拟数（对战双方相同才公平，已统一由此参数控制）。150~300 更快、600 更强；吞吐随 sims 线性下降", False),
         "mcts.eval_material_weight": ("评估子力权重", "两处用途：①纯MCTS的rollout未分胜负时按子力差给连续估值；②抽奖候选效果选择时的静态评估。输出压在±权重内。推荐0.1~0.2；设0=关闭", False),
@@ -73,12 +74,12 @@ PARAM_GROUPS = [
     ("全局搜索（训练与对战共用）",
      ["mcts.num_mcts_sims", "mcts.cpuct", "mcts.temperature",
       "mcts.temp_threshold", "mcts.eval_material_weight",
-      "mcts.virtual_loss", "mcts.lottery_eval_limit"]),
+      "mcts.virtual_loss", "mcts.lottery_eval_limit", "mcts.lottery_nn_eval"]),
     ("自对弈数据收集",
      ["selfplay.dirichlet_alpha", "selfplay.dirichlet_epsilon",
       "selfplay.max_moves", "selfplay.parallel_games",
       "selfplay.mcts_threads", "selfplay.neural_batch_size",
-      "selfplay.neural_batch_timeout_ms"]),
+      "selfplay.neural_batch_timeout_ms", "selfplay.min_game_samples"]),
     ("对战评测",
      ["selfplay.match_parallel_games"]),
 ]
@@ -242,6 +243,11 @@ class Panel:
         self.net_name_entry = tk.Entry(row, textvariable=self.net_name_var, width=16, font=FONT)
         self.net_name_entry.pack(side="left", padx=5)
         tk.Label(row, text="（保存为 名称.pt/.onnx）", font=FONT, fg="#666").pack(side="left")
+        # 2026-09-09（用户要求）：强制开局抽奖——对局开始前双方各抽 5 次奖，
+        # 准备阶段的抽奖不计入总步数和抽奖数（与对战界面"启用准备模式"同口径）
+        self.train_prepare_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(row, text="强制开局抽奖", font=FONT,
+                       variable=self.train_prepare_var).pack(side="right", padx=(10, 2))
 
         # 按钮
         btns = tk.Frame(f)
@@ -795,8 +801,9 @@ class Panel:
         # 启动 collector 子进程
         cmd = [DOTNET, COLLECTOR_DLL, str(self.target_games), data_sub,
                progress_file, pause_flag]
-        if onnx_path:
-            cmd.append(onnx_path)
+        # args[4]=onnxPath（"-" 占位表示无网络指导），args[5]=强制开局抽奖开关
+        cmd.append(onnx_path if onnx_path else "-")
+        cmd.append("1" if self.train_prepare_var.get() else "0")
         log_path = os.path.join(self.data_dir, "log.txt")
         logf = open(log_path, "w", encoding="utf-8")
         no_window = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
