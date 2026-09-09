@@ -36,9 +36,35 @@ public static class SelfPlayTrainer
         int neuralBatchSize = 32, int neuralBatchTimeoutMs = 2,
         double evalMaterialWeight = 0.15,
         double virtualLossValue = 0.5, int minGameSamples = 10,
-        bool lotteryNnEval = false, bool prepareLottery = false)
+        bool lotteryNnEval = false, int prepareCount = 0)
     {
         Directory.CreateDirectory(dataDir);
+
+        // ── 2026-09-09（用户要求）：prepare 局随机分布 ──
+        // 从 [0, numGames) 均匀洗牌取前 prepareCount 个局号作为开启准备模式的对局，
+        // 避免聚集在连续段落（训练侧 train.py 虽为全量随机抽样，此处仍随机分布
+        // 作为双保险，且使 bin 文件顺序上天然混合）。固定 seed 保证同配置可复现。
+        var prepareSet = new System.Collections.Generic.HashSet<int>();
+        if (prepareCount > 0)
+        {
+            if (prepareCount >= numGames)
+            {
+                for (int i = 0; i < numGames; i++) prepareSet.Add(i);
+            }
+            else
+            {
+                var order = new int[numGames];
+                for (int i = 0; i < numGames; i++) order[i] = i;
+                var shuf = new Random(20260909);
+                for (int i = numGames - 1; i > 0; i--)
+                {
+                    int j = shuf.Next(i + 1);
+                    (order[i], order[j]) = (order[j], order[i]);
+                }
+                for (int i = 0; i < prepareCount; i++) prepareSet.Add(order[i]);
+            }
+            Console.WriteLine($"开局准备局数: {prepareSet.Count}/{numGames}（随机分布）");
+        }
 
         bool hasOnnxPath = !string.IsNullOrEmpty(onnxPath) && File.Exists(onnxPath);
         if (!string.IsNullOrEmpty(onnxPath) && !hasOnnxPath)
@@ -82,7 +108,8 @@ public static class SelfPlayTrainer
                 int moves = RunSingleGame(gameIdx, numSims, effectiveThreads, dataDir, sharedNeural,
                     dirichletAlpha, dirichletEpsilon, temperature, tempThreshold, cpuct, maxMoves,
                     pauseFlag, evalMaterialWeight,
-            virtualLossValue, minGameSamples, lotteryNnEval, prepareLottery);
+            virtualLossValue, minGameSamples, lotteryNnEval,
+            prepareSet.Contains(gameIdx));
                 sw.Stop();
                 Console.WriteLine($"第 {gameIdx + 1}/{numGames} 局完成，用时 {sw.Elapsed.TotalSeconds:F1} 秒，步数 {moves}");
 
@@ -108,7 +135,7 @@ public static class SelfPlayTrainer
         double dirichletEpsilon, double temperature, int tempThreshold, double cpuct,
         int maxMoves, string pauseFlag, double evalMaterialWeight,
         double virtualLossValue, int minGameSamples, bool lotteryNnEval,
-        bool prepareLottery)
+        bool doPrepare)
     {
         var red = new AIPlayer(numSims, C: cpuct, seed: gameIdx * 2 + 1,
             aiTeam: 1, threadCount: mctsThreads, neural: neural,
@@ -127,26 +154,31 @@ public static class SelfPlayTrainer
         state.prepareModeOn = false;
         var rng = new Random(gameIdx);
 
-        // ── 2026-09-09（用户要求）：强制开局抽奖（prepareLottery=true 时）──
+        // ── 2026-09-09（用户要求）：强制开局抽奖（doPrepare=true 时）──
         // 与对战模式 MatchRunner 相同口径：双方交替各抽 5 次奖（共 10 轮）。
         // 期间 prepareModeOn=true（EndTurn 不恢复狙击冷却/冻结/墙）。
         // 抽奖不计入对局步数（在 move 循环外）、不产生训练样本（无 AI 决策点）、
         // 不计入抽奖数统计、不进重复检测（tracker 在其后创建）。
-        if (prepareLottery)
+        if (doPrepare)
         {
             state.prepareModeOn = true;
             for (int round = 0; round < 10; round++)
             {
                 state.currentTeam = (round % 2 == 0) ? 1 : -1;
                 int outcome = rng.Next(1, 41);
-                LotteryResolver.Resolve(state, outcome, rng);
+                // 2026-09-09（用户要求）：prepare 抽奖目标走 PreFilter + 评估链路，
+                // 与正式对局同口径（由当前行动方 AI 评估选最优；NN 评估随
+                // mcts.lottery_nn_eval 开关，纯 MCTS 时用子力差启发式）
+                AIPlayer ai = (state.currentTeam == 1) ? red : black;
+                LotteryChoice sel = ai.SelectLotteryChoice(state, outcome);
+                LotteryResolver.ResolveChoice(state, outcome, sel);
                 state.prepareLotteryCount++;
                 if (state.prepareLotteryCount >= 10)
                     state.prepareModeOn = false;
             }
             state.prepareModeOn = false;
             state.currentTeam = 1; // 准备结束，红方先手
-            Console.WriteLine($"[Game {gameIdx}] 开局准备：双方各抽 5 次奖（不计入步数/样本/抽奖数）");
+            Console.WriteLine($"[Game {gameIdx}] 开局准备：双方各抽 5 次奖（不计入步数/样本/抽奖数，目标走 PreFilter+评估）");
         }
 
         var boards = new List<float[]>();

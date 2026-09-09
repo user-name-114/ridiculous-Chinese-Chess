@@ -54,6 +54,13 @@ public class AIPlayer
         return engine.FindBestAction(state, rng);
     }
 
+    /// <summary>抽奖目标选择（2026-09-09）：GetChoices → PreFilter → NN/子力评估，
+    /// 供 prepare 阶段使用，与正式对局同链路。无候选返回 null（自动路径）。</summary>
+    public LotteryChoice SelectLotteryChoice(Gamestate state, int outcome)
+    {
+        return engine.SelectLotteryChoiceExternal(state, outcome);
+    }
+
     /// <summary>带真实对局历史，返回最优行动（让 MCTS 感知重复局面）</summary>
     public GameAction GetBestAction(Gamestate state, RepetitionTracker history)
     {

@@ -829,6 +829,18 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
         return bestChoice;
     }
 
+    /// <summary>公开入口（2026-09-09）：抽奖目标选择完整链路——GetChoices → PreFilter →
+    /// Auto 评估分发（NN/子力，随 mcts.lottery_nn_eval 开关）。供 prepare 阶段
+    /// （训练自对弈/对战评测）使用，与正式对局的抽奖目标选择同链路同口径。
+    /// 无候选时返回 null（走 ResolveAutomatic 自动路径）。</summary>
+    public LotteryChoice SelectLotteryChoiceExternal(Gamestate state, int outcome)
+    {
+        var choices = LotteryResolver.GetChoices(state, outcome);
+        if (choices.Count == 0) return null;
+        choices = PreFilter(state, outcome, choices, lotteryEvalLimit);
+        return SelectLotteryChoiceAuto(state, outcome, choices);
+    }
+
     /// <summary>候选选择分发（2026-09-09）：lotteryNnEval 且有网络时走 NN 批量评估
     /// （共享队列合批），否则维持子力差启发式。
     /// 2026-09-09 用户确认启用 NN 评估（config mcts.lottery_nn_eval=true）：
@@ -849,8 +861,14 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
     /// 节点形状完全一致），批量塞进 NeuralMcts 共享请求队列与主搜索合批。
     /// 替代 2026-09-08 被否决的独立同步 PredictValues（+301% 根因 = 独立 session.Run
     /// 争抢 GPU）；本轮与主搜索共用同一批量流水线。
-    /// 口径与子力版一致：ResolveChoice + EndTurn 后，选 value 最低（EndTurn 后当前方=
-    /// 对手，value 即对手视角，越低越好）的候选；终局候选不送网络直接 Evaluate。
+    /// 口径与子力版一致：ResolveChoice + EndTurn 后，候选值统一转成"对手视角"
+    /// （candidate 当前方，即接手的一方）取最低——对手接手后局面越差越好。
+    /// 【视角约定】网络 value 是固定红方视角（StateEncoder 固定红方视角不翻转 +
+    /// 训练标签红方视角 + 主搜索叶子评估按 currentTeam 取反三重证据），
+    /// 不是对手视角：需按执行方翻转——执行方是黑（对手=红）时直接用，
+    /// 执行方是红（对手=黑）时取反。终局候选 Evaluate(candidate) 本身即
+    /// 当前行动方（对手）视角，直接使用。子力版 EvalMaterialHeuristic
+    /// 按 candidate 当前方算 mine/theirs，天然对手视角，无需翻转。
     /// DeepClone：每候选一次（与子力版同模式）。undo log 方案经评估收益不足：
     /// 25 次 DeepClone+应用+编码 ~1-2ms vs 批量 GPU 等待 ~10-25ms，占比小，见实验报告。
     /// </summary>
@@ -900,9 +918,20 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
         double bestOpponentValue = double.PositiveInfinity;
         int bestIdx = 0;
         int nnIdx = 0;
+        // 视角修复（2026-09-09）：网络 value = 固定红方视角，须转成对手视角再取 min。
+        // candidate 已 EndTurn（当前方 = 对手）：对手是红（执行方是黑）直接用，
+        // 对手是黑（执行方是红）取反。修复前红方执行抽奖会选到"帮对手"的目标。
+        bool oppIsRed = state.currentTeam == -1;
         for (int i = 0; i < n; i++)
         {
-            double opponentValue = isTerm[i] ? termVal[i] : nnValues[nnIdx++];
+            double opponentValue;
+            if (isTerm[i])
+                opponentValue = termVal[i]; // Evaluate = 当前行动方（对手）视角，直接用
+            else
+            {
+                double v = nnValues[nnIdx++];
+                opponentValue = oppIsRed ? v : -v;
+            }
             if (opponentValue < bestOpponentValue)
             {
                 bestOpponentValue = opponentValue;

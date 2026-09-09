@@ -54,7 +54,11 @@ public static class MatchRunner
             {
                 state.currentTeam = (round % 2 == 0) ? 1 : -1;
                 int outcome = rng.Next(1, 41);
-                LotteryResolver.Resolve(state, outcome, rng);
+                // 2026-09-09（用户要求）：prepare 抽奖目标走 PreFilter + 评估链路，
+                // 与正式对局同口径（由当前行动方 AI 评估选最优）
+                AIPlayer ai = (state.currentTeam == 1) ? red : black;
+                LotteryChoice sel = ai.SelectLotteryChoice(state, outcome);
+                LotteryResolver.ResolveChoice(state, outcome, sel);
                 if (state.currentTeam == 1) redLottery++;
                 else blackLottery++;
                 aiLotteryCount++;
