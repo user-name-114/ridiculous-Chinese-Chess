@@ -186,18 +186,27 @@ int numGames = int.Parse(args[0]);
 string dataDir = Path.GetFullPath(args[1]);
 string progressFile = args.Length > 2 ? args[2] : null;
 string pauseFlag = args.Length > 3 ? args[3] : null;
-// 2026-09-09：args[4] 支持 "-" 占位（无网络指导纯 MCTS），args[5] = 强制开局抽奖开关
+// 2026-09-09：args[4] 支持 "-" 占位（无网络指导纯 MCTS），args[5] = 强制开局抽奖开关，
+// args[6] = 准备模式局数占比（0.0~1.0，可选；prepareCount=ceil(numGames×占比)，
+// 局集合在引擎内随机洗牌分布，避免聚集）
 string onnxPath = args.Length > 4 && args[4] != "-" ? args[4] : null;
 bool prepareLottery = args.Length > 5 && args[5] == "1";
+double prepareRatio = 1.0;
+if (prepareLottery && args.Length > 6 &&
+    double.TryParse(args[6], System.Globalization.NumberStyles.Any,
+        System.Globalization.CultureInfo.InvariantCulture, out var prEl))
+    prepareRatio = Math.Clamp(prEl, 0.0, 1.0);
+int prepareCount = prepareLottery ? (int)Math.Ceiling(numGames * prepareRatio) : 0;
 
 Console.WriteLine($"数据输出目录: {dataDir}");
 Console.WriteLine($"每步模拟次数: {numSims}");
 Console.WriteLine($"并行: {parallelGames} 局 × {mctsThreads} MCTS 线程" + (onnxPath != null ? $" | 批量推理(batch={neuralBatchSize})" : ""));
 Console.WriteLine($"温度: {temperature}（前 {tempThreshold} 步）| Dirichlet: α={dirichletAlpha} ε={dirichletEpsilon} | cpuct={cpuct} | 最大步数: {maxMoves}");
-Console.WriteLine($"开局准备(强制抽奖，不计入步数/样本): {prepareLottery}");
+Console.WriteLine($"开局准备(强制抽奖，不计入步数/样本): {prepareLottery}"
+    + (prepareLottery ? $"，占比 {prepareRatio:P0} → {prepareCount}/{numGames} 局（随机分布）" : ""));
 
 SelfPlayTrainer.Run(numGames, numSims, mctsThreads, parallelGames, dataDir,
     progressFile, pauseFlag, onnxPath,
     dirichletAlpha, dirichletEpsilon, temperature, tempThreshold, cpuct, maxMoves,
     neuralBatchSize, neuralBatchTimeoutMs, evalMaterialWeight,
-    virtualLossValue, minGameSamples, lotteryNnEval, prepareLottery);
+    virtualLossValue, minGameSamples, lotteryNnEval, prepareCount);
