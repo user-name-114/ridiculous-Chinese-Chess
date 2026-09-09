@@ -246,8 +246,25 @@ class Panel:
         # 2026-09-09（用户要求）：强制开局抽奖——对局开始前双方各抽 5 次奖，
         # 准备阶段的抽奖不计入总步数和抽奖数（与对战界面"启用准备模式"同口径）
         self.train_prepare_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(row, text="强制开局抽奖", font=FONT,
-                       variable=self.train_prepare_var).pack(side="right", padx=(10, 2))
+        self.train_prepare_cb = tk.Checkbutton(row, text="强制开局抽奖", font=FONT,
+                                               variable=self.train_prepare_var)
+        self.train_prepare_cb.pack(side="right", padx=(10, 2))
+        # 2026-09-09（用户要求）：勾选后显示占比滑动条——控制开启准备模式的
+        # 对局数占比（0-100%，向上取整），prepare 局在所有对局中随机分布
+        self.prepare_pct_var = tk.IntVar(value=100)
+        self.prepare_pct_slider = tk.Scale(row, from_=0, to=100, orient="horizontal",
+                                           length=180, showvalue=True, font=FONT,
+                                           label="准备局数占比%",
+                                           variable=self.prepare_pct_var)
+
+        def _toggle_prepare_slider():
+            if self.train_prepare_var.get():
+                self.prepare_pct_slider.pack(side="right", padx=(10, 2),
+                                             before=self.train_prepare_cb)
+            else:
+                self.prepare_pct_slider.pack_forget()
+
+        self.train_prepare_var.trace_add("write", lambda *a: _toggle_prepare_slider())
 
         # 按钮
         btns = tk.Frame(f)
@@ -801,9 +818,12 @@ class Panel:
         # 启动 collector 子进程
         cmd = [DOTNET, COLLECTOR_DLL, str(self.target_games), data_sub,
                progress_file, pause_flag]
-        # args[4]=onnxPath（"-" 占位表示无网络指导），args[5]=强制开局抽奖开关
+        # args[4]=onnxPath（"-" 占位表示无网络指导），args[5]=强制开局抽奖开关，
+        # args[6]=准备模式局数占比（0.00~1.00）
         cmd.append(onnx_path if onnx_path else "-")
         cmd.append("1" if self.train_prepare_var.get() else "0")
+        if self.train_prepare_var.get():
+            cmd.append(f"{self.prepare_pct_var.get() / 100.0:.2f}")
         log_path = os.path.join(self.data_dir, "log.txt")
         logf = open(log_path, "w", encoding="utf-8")
         no_window = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
