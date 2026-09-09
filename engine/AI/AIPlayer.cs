@@ -30,7 +30,7 @@ public class AIPlayer
         double evalMaterialWeight = 0.15,
         double virtualLossValue = 0.5,
         int lotteryEvalLimit = 16,
-        int maxRolloutDepth = 200)
+        int maxRolloutDepth = 200, bool lotteryNnEval = false)
     {
         Simulations = simulations;
         AllowLottery = allowLottery;
@@ -43,7 +43,8 @@ public class AIPlayer
             dirichletAlpha: dirichletAlpha, dirichletEpsilon: dirichletEpsilon,
             evalMaterialWeight: evalMaterialWeight,
             virtualLossValue: virtualLossValue,
-            lotteryEvalLimit: lotteryEvalLimit);
+            lotteryEvalLimit: lotteryEvalLimit,
+            lotteryNnEval: lotteryNnEval);
         rng = seed.HasValue ? new System.Random(seed.Value) : new System.Random();
     }
 

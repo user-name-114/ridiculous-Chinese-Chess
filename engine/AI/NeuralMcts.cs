@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
@@ -385,6 +385,42 @@ public class NeuralMcts
                 values[i] = Predict(states[i]).value;
             return values;
         }
+    }
+
+    // ================================================================
+    //  批量价值评估 v2（2026-09-09，抽奖候选选择：走共享请求队列与主搜索合批）
+    // ================================================================
+
+    /// <summary>预编码批量价值评估：N 个请求塞进现有请求队列（与主搜索共用批量流水线，
+    /// 天然合批、不与 GPU 争抢），阻塞等待全部返回后取 value。
+    /// 替代旧版独立同步 PredictValues（2026-09-08 实测 +301% 的根因是独立 session.Run
+    /// 与主流水线争抢 GPU）。批量服务未启动时退化为单次同步批量前向。
+    /// 调用方需预先完成 StateEncoder.Encode/EncodeGraveyard（形状与叶子节点完全一致）。</summary>
+    public float[] PredictValuesViaQueue(float[][] boards, float[][] graveyards)
+    {
+        int n = boards.Length;
+        if (n == 0) return Array.Empty<float>();
+
+        if (_requestQueue == null || !_batchRunning)
+        {
+            var (_, syncValues) = PredictBatchFromEncoded(boards, graveyards, n);
+            return syncValues;
+        }
+
+        var tcsList = new TaskCompletionSource<(float[] policy, int policyOffset, float value)>[n];
+        var tasks = new Task[n];
+        for (int i = 0; i < n; i++)
+        {
+            tcsList[i] = new TaskCompletionSource<(float[] policy, int policyOffset, float value)>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            tasks[i] = tcsList[i].Task;
+            _requestQueue.Add(new PredictRequest { Board = boards[i], Graveyard = graveyards[i], Tcs = tcsList[i] });
+        }
+        Task.WaitAll(tasks);
+        var values = new float[n];
+        for (int i = 0; i < n; i++)
+            values[i] = tcsList[i].Task.Result.value;
+        return values;
     }
 
     public void Dispose()

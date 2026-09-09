@@ -123,6 +123,7 @@ public class MctsEngine
 
     private double evalMaterialWeight;
     private int lotteryEvalLimit;
+    private bool lotteryNnEval;   // 2026-09-09：抽奖候选用网络评估（false=子力差启发式）
 
     public MctsEngine(int simulations = 1000, double C = 1.2, int maxRolloutDepth = 200,
         bool allowLottery = true, int aiTeam = 0,
@@ -131,7 +132,7 @@ public class MctsEngine
         double dirichletAlpha = 0, double dirichletEpsilon = 0,
         double evalMaterialWeight = 0.15,
         double virtualLossValue = 0.5,
-        int lotteryEvalLimit = 16)
+        int lotteryEvalLimit = 16, bool lotteryNnEval = false)
     {
         this.maxSimulations = simulations;
         this.explorationConstant = C;
@@ -147,6 +148,7 @@ public class MctsEngine
         this.evalMaterialWeight = evalMaterialWeight;
         this.virtualLossValue = virtualLossValue;
         this.lotteryEvalLimit = lotteryEvalLimit;
+        this.lotteryNnEval = lotteryNnEval;
     }
 
     // ================================================================
@@ -346,13 +348,15 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
                         var chs = LotteryResolver.GetChoices(ws, outcome);
                         if (chs.Count == 0)
                             preFc = null;
-                        else if (neural == null)
-                            preFc = chs[wr.Next(chs.Count)];
                         else
                         {
-                            // 候选可能成百上千(双生成炮马类目标对):全量评估会造成评估风暴,超限等距抽样
-                            chs = SampleChoices(chs, lotteryEvalLimit, wr);
-                            preFc = SelectLotteryChoiceByValue(ws, outcome, chs);
+                        // 候选可能成百上千(双生成炮马类目标对):全量评估会造成评估风暴。
+                        // 2026-09-09:超限先全量预筛(目标点打分,敌子目标必进 top-k)再评估,
+                        // 三处口径统一(WorkerSim / HandleChanceNode / ExecuteLotteryOutcome)
+                        chs = PreFilter(ws, outcome, chs, lotteryEvalLimit);
+                        preFc = neural == null
+                            ? chs[wr.Next(chs.Count)]
+                            : SelectLotteryChoiceAuto(ws, outcome, chs);
                         }
                     }
                     lock (_treeLock)
@@ -723,22 +727,18 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
             // 否则同一子节点对应不同具体局面,破坏子树状态一致性(历史 bug 根源)
             List<LotteryChoice> choices = LotteryResolver.GetChoices(state, outcome);
             // 候选可能成百上千(双生成枚举目标对):全量评估会造成评估风暴,超限等距抽样
-            // ── 已知问题(2026-09-04 外部审查核实,按约定注释搁置)──
-            // 问题:纯 MCTS(neural == null)且走串行路径(threadCount <= 1)时,本方法
-            // 先随机无放回抽样到 lotteryEvalLimit 再随机取一个,候选分布是"抽样子集内均匀";
-            // 并行版 WorkerSim 的对应分支则是全量随机(不抽样)。两版行为不等价,
-            // 且此处对纯随机选择而言抽样步骤是纯浪费。
-            // 搁置原因:1 当前训练与对局均走神经网络模式,纯 MCTS + 串行路径基本不用;
-            // 2 修复需先统一三处口径(本方法 / WorkerSim / ExecuteLotteryOutcome),
-            //    单改此处会制造新的不一致;3 收益低、回归风险高。
-            choices = SampleChoices(choices, lotteryEvalLimit, rng);
+            // 2026-09-09:超限先全量预筛(PreFilter,目标点打分)再取 top-k。
+            // 原 SampleChoices 为随机抽样(注释却写"等距"),且纯 MCTS 串行路径与
+            // 并行 WorkerSim 口径不一致(原"已知问题 2026-09-04")——预筛统一后三处
+            // (本方法 / WorkerSim / ExecuteLotteryOutcome)产生自同一候选集,问题随之消除。
+            choices = PreFilter(state, outcome, choices, lotteryEvalLimit);
             LotteryChoice fixedChoice;
             if (choices.Count == 0)
                 fixedChoice = null; // 无可选目标,交给 Resolver 的自动路径
             else
                 fixedChoice = neural == null
                     ? choices[rng.Next(choices.Count)]
-                    : SelectLotteryChoiceByValue(state, outcome, choices);
+                    : SelectLotteryChoiceAuto(state, outcome, choices);
 
             oc = new MctsNode(null, node) { fixedChoice = fixedChoice }; // outcome 子节点无 action
             node.outcomeChildren[outcome] = oc;
@@ -772,15 +772,14 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
             return;
         }
 
-        // 修复(2026-09-04,批评确认):与搜索树内候选逻辑对齐--神经网络模式下
-        // 同样等距抽样到 lotteryEvalLimit,保证树内固化的 choice 与真实执行
-        // 产生自同一候选集;同时消除真实对局数百次 DeepClone+评估的阻塞。
-        if (neural != null)
-            choices = SampleChoices(choices, lotteryEvalLimit, rng);
+        // 2026-09-09:与树内固化同口径——超限先全量预筛(PreFilter)再取 top-k,
+        // 树内固化的 choice 与真实执行产生自同一候选集;
+        // 同时消除真实对局数百次 DeepClone+评估的阻塞。
+        choices = PreFilter(state, outcome, choices, lotteryEvalLimit);
 
         LotteryChoice selected = neural == null
             ? choices[rng.Next(choices.Count)]
-            : SelectLotteryChoiceByValue(state, outcome, choices);
+            : SelectLotteryChoiceAuto(state, outcome, choices);
         LotteryResolver.ResolveChoice(state, outcome, selected);
     }
 
@@ -789,6 +788,15 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
     /// 【性能关键】不再调用神经网络——此函数在搜索内部高频触发，
     /// 旧版直连 session.Run 与批量流水线争抢 GPU，是 44s/步 的主要阻塞源。
     /// F1 材料差对“生成/升级类”效果是足够好的短期代理；长期价值仍由
+    /// 主搜索的 outcome 子树统计学习。
+    /// </summary>
+    /// <summary>
+    /// 候选效果选择：用 F1 子力差启发式静态评估（选使对手局面最差的效果）。
+    /// 【性能关键】不调用神经网络——2026-09-08 实测对比（各 8 局、同配置同网络）：
+    /// NN 价值选择（单次批量 PredictValues，≤25 候选）使自对弈总耗时
+    /// 191.9s → 769.2s（+301%），且对局显著变长（中位 34 → 79 步），
+    /// 样本产出率下降 ~35%（6.1k → 4.0k 样本/时）——远超 +15% 可接受线，已否决。
+    /// 子力差对“生成/升级类”效果是足够好的短期代理；长期价值仍由
     /// 主搜索的 outcome 子树统计学习。
     /// </summary>
     private LotteryChoice SelectLotteryChoiceByValue(Gamestate state, int outcome,
@@ -819,6 +827,89 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
         }
 
         return bestChoice;
+    }
+
+    /// <summary>候选选择分发（2026-09-09）：lotteryNnEval 且有网络时走 NN 批量评估
+    /// （共享队列合批），否则维持子力差启发式。
+    /// 2026-09-09 用户确认启用 NN 评估（config mcts.lottery_nn_eval=true）：
+    /// 共享队列合批 + PreFilter 候选≤25，实测样本产出率仅 −9.0%（旧独立同步
+    /// 方案为 −75%）。优化点：①复用叶子请求的同一批量流水线，不新建推理通道；
+    /// ②候选编码与叶子节点形状完全一致（3388+18），直接入队；③DeepClone 占比
+    /// 仅 0.3%（微基准），维持与子力版相同的克隆模式。</summary>
+    private LotteryChoice SelectLotteryChoiceAuto(Gamestate state, int outcome,
+        List<LotteryChoice> choices)
+    {
+        if (lotteryNnEval && neural != null)
+            return SelectLotteryChoiceByNN(state, outcome, choices);
+        return SelectLotteryChoiceByValue(state, outcome, choices);
+    }
+
+    /// <summary>
+    /// NN 价值选择 v2（2026-09-09）：候选应用后编码（board 22×14×11 + grave 18，与叶子
+    /// 节点形状完全一致），批量塞进 NeuralMcts 共享请求队列与主搜索合批。
+    /// 替代 2026-09-08 被否决的独立同步 PredictValues（+301% 根因 = 独立 session.Run
+    /// 争抢 GPU）；本轮与主搜索共用同一批量流水线。
+    /// 口径与子力版一致：ResolveChoice + EndTurn 后，选 value 最低（EndTurn 后当前方=
+    /// 对手，value 即对手视角，越低越好）的候选；终局候选不送网络直接 Evaluate。
+    /// DeepClone：每候选一次（与子力版同模式）。undo log 方案经评估收益不足：
+    /// 25 次 DeepClone+应用+编码 ~1-2ms vs 批量 GPU 等待 ~10-25ms，占比小，见实验报告。
+    /// </summary>
+    private LotteryChoice SelectLotteryChoiceByNN(Gamestate state, int outcome,
+        List<LotteryChoice> choices)
+    {
+        StatSweeps++;
+        StatSweepCand += choices.Count;
+        int n = choices.Count;
+
+        var boards = new float[n][];
+        var graves = new float[n][];
+        var isTerm = new bool[n];
+        var termVal = new double[n];
+
+        for (int i = 0; i < n; i++)
+        {
+            var candidate = state.DeepClone();
+            LotteryResolver.ResolveChoice(candidate, outcome, choices[i]);
+            GameAction.EndTurn(candidate);
+            if (IsTerminal(candidate))
+            {
+                isTerm[i] = true;
+                termVal[i] = Evaluate(candidate);
+            }
+            else
+            {
+                boards[i] = StateEncoder.Encode(candidate);
+                graves[i] = StateEncoder.EncodeGraveyard(candidate);
+            }
+        }
+
+        // 非终局候选一次批量提交（走共享队列，与主搜索请求合批）
+        int m = 0;
+        for (int i = 0; i < n; i++) if (!isTerm[i]) m++;
+        float[] nnValues = Array.Empty<float>();
+        if (m > 0)
+        {
+            var nb = new float[m][];
+            var ng = new float[m][];
+            int k = 0;
+            for (int i = 0; i < n; i++)
+                if (!isTerm[i]) { nb[k] = boards[i]; ng[k] = graves[i]; k++; }
+            nnValues = neural.PredictValuesViaQueue(nb, ng);
+        }
+
+        double bestOpponentValue = double.PositiveInfinity;
+        int bestIdx = 0;
+        int nnIdx = 0;
+        for (int i = 0; i < n; i++)
+        {
+            double opponentValue = isTerm[i] ? termVal[i] : nnValues[nnIdx++];
+            if (opponentValue < bestOpponentValue)
+            {
+                bestOpponentValue = opponentValue;
+                bestIdx = i;
+            }
+        }
+        return choices[bestIdx];
     }
 
     // ================================================================
@@ -1285,21 +1376,39 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
     /// F2:完全平手时随机破序,消除动作枚举顺序导致的结构性饿死
     /// (抽奖是枚举末位,在零值世界里会被系统性跳过)。</summary>
     /// <summary>
-    /// 无放回均匀抽样(Fisher-Yates 部分洗牌取前 k 个)。
-    /// 修复(2026-09-04,批评确认):双生成类候选由 for i, for j>i 嵌套循环生成,
-    /// 索引→(i,j) 映射不均匀(小 i 的 pair 密集、大 i 稀疏),原按索引等距取样
-    /// 会系统性偏向列表前段;改为随机无放回抽样后所有候选等概率进入评估子集。
+    /// 全量预筛(2026-09-09,替代原 SampleChoices 随机抽样):候选超限时对全量候选
+    /// 按目标点打分取 top-k,保证"能顶掉/影响敌子"的目标 100% 进入评估子集。
+    /// 零 DeepClone,纯查格子,开销可忽略;DeepClone 评估仍只做 k 次。
+    /// 打分(见 TargetScore):敌子 → -子力值(价值越高越优先);空位 → 0;己方 → 最后。
+    /// 同分按枚举顺序稳定保留(双键稳定排序,不引入不确定性)。
     /// </summary>
-    private static List<LotteryChoice> SampleChoices(List<LotteryChoice> chs, int k, System.Random rng)
+    private static List<LotteryChoice> PreFilter(Gamestate state, int outcome,
+        List<LotteryChoice> all, int k)
     {
-        if (chs.Count <= k) return chs;
-        var pool = new List<LotteryChoice>(chs);
-        for (int i = 0; i < k; i++)
+        if (all.Count <= k) return all;
+        var scored = new List<(LotteryChoice c, double s, int idx)>(all.Count);
+        for (int i = 0; i < all.Count; i++)
+            scored.Add((all[i], TargetScore(state, all[i]), i));
+        scored.Sort((a, b) =>
         {
-            int jj = rng.Next(i, pool.Count);
-            (pool[i], pool[jj]) = (pool[jj], pool[i]);
-        }
-        return pool.GetRange(0, k);
+            int cmp = a.s.CompareTo(b.s);
+            return cmp != 0 ? cmp : a.idx.CompareTo(b.idx); // 稳定:同分保枚举序
+        });
+        var result = new List<LotteryChoice>(k);
+        for (int i = 0; i < k && i < scored.Count; i++) result.Add(scored[i].c);
+        return result;
+    }
+
+    // 预筛打分:目标点有敌子 → -敌方子力值(负=优先);空位/无效 → 0;己方子 → 最后。
+    // 生成类(目标为空)不加分也不减分,同分内保持枚举序。
+    private static double TargetScore(Gamestate state, LotteryChoice c)
+    {
+        if (c.x < state.leftBound || c.x > state.rightBound
+            || c.y < state.lowerBound || c.y > state.upperBound) return 0;
+        Piece p = state[c.x, c.y];
+        if (p.type == PieceType.Empty || p.isDead) return 0;
+        if (p.thisTeam != state.currentTeam) return -PieceStrengthPoints(p); // 顶敌子,优先
+        return double.MaxValue; // 己方(非友伤时本就不该入选)
     }
 
     private MctsNode BestPuctChild(MctsNode node, System.Random rng, HashSet<MctsNode> skip = null)

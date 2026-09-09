@@ -35,7 +35,8 @@ public static class SelfPlayTrainer
         int tempThreshold = 15, double cpuct = 1.2, int maxMoves = 400,
         int neuralBatchSize = 32, int neuralBatchTimeoutMs = 2,
         double evalMaterialWeight = 0.15,
-        double virtualLossValue = 0.5)
+        double virtualLossValue = 0.5, int minGameSamples = 10,
+        bool lotteryNnEval = false, bool prepareLottery = false)
     {
         Directory.CreateDirectory(dataDir);
 
@@ -81,7 +82,7 @@ public static class SelfPlayTrainer
                 int moves = RunSingleGame(gameIdx, numSims, effectiveThreads, dataDir, sharedNeural,
                     dirichletAlpha, dirichletEpsilon, temperature, tempThreshold, cpuct, maxMoves,
                     pauseFlag, evalMaterialWeight,
-            virtualLossValue);
+            virtualLossValue, minGameSamples, lotteryNnEval, prepareLottery);
                 sw.Stop();
                 Console.WriteLine($"第 {gameIdx + 1}/{numGames} 局完成，用时 {sw.Elapsed.TotalSeconds:F1} 秒，步数 {moves}");
 
@@ -106,22 +107,47 @@ public static class SelfPlayTrainer
         string dataDir, NeuralMcts neural, double dirichletAlpha,
         double dirichletEpsilon, double temperature, int tempThreshold, double cpuct,
         int maxMoves, string pauseFlag, double evalMaterialWeight,
-        double virtualLossValue)
+        double virtualLossValue, int minGameSamples, bool lotteryNnEval,
+        bool prepareLottery)
     {
         var red = new AIPlayer(numSims, C: cpuct, seed: gameIdx * 2 + 1,
             aiTeam: 1, threadCount: mctsThreads, neural: neural,
             dirichletAlpha: dirichletAlpha, dirichletEpsilon: dirichletEpsilon,
             evalMaterialWeight: evalMaterialWeight,
-            virtualLossValue: virtualLossValue);
+            virtualLossValue: virtualLossValue,
+            lotteryNnEval: lotteryNnEval);
         var black = new AIPlayer(numSims, C: cpuct, seed: gameIdx * 2 + 2,
             aiTeam: -1, threadCount: mctsThreads, neural: neural,
             dirichletAlpha: dirichletAlpha, dirichletEpsilon: dirichletEpsilon,
             evalMaterialWeight: evalMaterialWeight,
-            virtualLossValue: virtualLossValue);
+            virtualLossValue: virtualLossValue,
+            lotteryNnEval: lotteryNnEval);
 
         var state = new Gamestate();
         state.prepareModeOn = false;
         var rng = new Random(gameIdx);
+
+        // ── 2026-09-09（用户要求）：强制开局抽奖（prepareLottery=true 时）──
+        // 与对战模式 MatchRunner 相同口径：双方交替各抽 5 次奖（共 10 轮）。
+        // 期间 prepareModeOn=true（EndTurn 不恢复狙击冷却/冻结/墙）。
+        // 抽奖不计入对局步数（在 move 循环外）、不产生训练样本（无 AI 决策点）、
+        // 不计入抽奖数统计、不进重复检测（tracker 在其后创建）。
+        if (prepareLottery)
+        {
+            state.prepareModeOn = true;
+            for (int round = 0; round < 10; round++)
+            {
+                state.currentTeam = (round % 2 == 0) ? 1 : -1;
+                int outcome = rng.Next(1, 41);
+                LotteryResolver.Resolve(state, outcome, rng);
+                state.prepareLotteryCount++;
+                if (state.prepareLotteryCount >= 10)
+                    state.prepareModeOn = false;
+            }
+            state.prepareModeOn = false;
+            state.currentTeam = 1; // 准备结束，红方先手
+            Console.WriteLine($"[Game {gameIdx}] 开局准备：双方各抽 5 次奖（不计入步数/样本/抽奖数）");
+        }
 
         var boards = new List<float[]>();
         var graves = new List<float[]>();
@@ -129,6 +155,8 @@ public static class SelfPlayTrainer
         var legalPerSample = new List<int[]>(); // 2026-09-08 掩码 v2：每决策点的合法动作索引
 
         int winner = 0;
+        string endReason = "撞步数上限（和棋）"; // 循环自然结束时即撞上限
+        // 2026-09-08（用户要求）：超短对局剔除阈值（样本数 < 10 即删）
         var repetitionTracker = new RepetitionTracker(state);
 
         int move;
@@ -140,6 +168,7 @@ public static class SelfPlayTrainer
             if (MctsEngine.IsTerminal(state))
             {
                 winner = -state.currentTeam; // 当前方被将死，对方胜
+                endReason = "吃将";
                 Console.WriteLine($"[Game {gameIdx}] 终局=吃将 胜方={(winner == 1 ? "红" : "黑")} 步数={move}");
                 break;
             }
@@ -184,6 +213,7 @@ public static class SelfPlayTrainer
             GameAction best = SampleActionByTemperature(dist, temp, rng);
             if (best == null)
             {
+                endReason = "无可用动作";
                 Console.WriteLine($"[Game {gameIdx}] 终局=无可用动作 胜方=红 步数={move}");
                 break;
             }
@@ -194,6 +224,7 @@ public static class SelfPlayTrainer
             if (repetitionTracker.AddState(state, isLottery))
             {
                 winner = state.currentTeam; // 刚走的一方判负，对手胜
+                endReason = "重复判负";
                 Console.WriteLine($"[Game {gameIdx}] 终局=重复判负 胜方={(winner == 1 ? "红" : "黑")} 步数={move} 走法={best.GetDescription()} isLottery={isLottery}");
                 // 打印 MCTS 输出的分布，看是否包含会导致重复的走法
                 foreach (var (a, p) in dist)
@@ -212,6 +243,21 @@ public static class SelfPlayTrainer
         }
 
         WriteData(dataDir, gameIdx, boards, graves, policies, legalPerSample, winner);
+
+        // 2026-09-08（用户要求，方案 A）：剔除超短对局——三五步就结束的对局
+        // 没有学习价值，只会污染训练。样本数低于阈值（minGameSamples）的 .bin
+        // 立即删除并记录日志；删除不打断自对弈（该局槽位正常释放，继续下一局）。
+        if (boards.Count < minGameSamples)
+        {
+            string badPath = Path.Combine(dataDir, $"game_{gameIdx:D4}.bin");
+            if (File.Exists(badPath))
+            {
+                File.Delete(badPath);
+                Console.WriteLine($"[Game {gameIdx}] 终局样本 {boards.Count} < {minGameSamples}，"
+                                  + $"对局过短无学习价值，已剔除 .bin（原因：{endReason}）");
+            }
+        }
+
         return move;
     }
 

@@ -209,7 +209,7 @@ public static class LotteryResolver
     {
         Piece piece = state[x, y];
         if (piece.type != PieceType.Empty && piece.type != PieceType.Wall && piece.thisTeam == -team)
-            piece.frozenTurns = 6;
+            piece.frozenTurns = 5; // 2026-09-09:6→5 与画面 5 拍渐变、规则文本"下两个回合"(禁 2 个己方回合)三方对齐
     }
 
     private static void DefrostAt(Gamestate state, int x, int y, int team)
@@ -496,7 +496,7 @@ public static class LotteryResolver
         if (candidates.Count == 0) return;
 
         Piece chosen = candidates[rng.Next(candidates.Count)];
-        chosen.frozenTurns = 6;
+        chosen.frozenTurns = 5; // 2026-09-09:6→5 与画面 5 拍渐变、规则文本"下两个回合"(禁 2 个己方回合)三方对齐
     }
 
     private static void ResolveDefrost(Gamestate state, int team, System.Random rng)
