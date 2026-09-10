@@ -36,7 +36,7 @@ public static class SelfPlayTrainer
         int neuralBatchSize = 32, int neuralBatchTimeoutMs = 2,
         double evalMaterialWeight = 0.15,
         double virtualLossValue = 0.5, int minGameSamples = 10,
-        bool lotteryNnEval = false, int prepareCount = 0)
+        bool lotteryNnEval = false, int prepareCount = 0, int lotteryEvalLimit = 16)
     {
         Directory.CreateDirectory(dataDir);
 
@@ -65,6 +65,9 @@ public static class SelfPlayTrainer
             }
             Console.WriteLine($"开局准备局数: {prepareSet.Count}/{numGames}（随机分布）");
         }
+        // 2026-09-09（用户核实）：候选评估上限必须从 config 透传——此前自对弈链路
+        // 漏传，AIPlayer 默认 16 生效，config 的 mcts.lottery_eval_limit=25 被忽略
+        Console.WriteLine($"抽奖候选评估上限: {lotteryEvalLimit}（config mcts.lottery_eval_limit）");
 
         bool hasOnnxPath = !string.IsNullOrEmpty(onnxPath) && File.Exists(onnxPath);
         if (!string.IsNullOrEmpty(onnxPath) && !hasOnnxPath)
@@ -109,7 +112,7 @@ public static class SelfPlayTrainer
                     dirichletAlpha, dirichletEpsilon, temperature, tempThreshold, cpuct, maxMoves,
                     pauseFlag, evalMaterialWeight,
             virtualLossValue, minGameSamples, lotteryNnEval,
-            prepareSet.Contains(gameIdx));
+            prepareSet.Contains(gameIdx), lotteryEvalLimit);
                 sw.Stop();
                 Console.WriteLine($"第 {gameIdx + 1}/{numGames} 局完成，用时 {sw.Elapsed.TotalSeconds:F1} 秒，步数 {moves}");
 
@@ -135,20 +138,22 @@ public static class SelfPlayTrainer
         double dirichletEpsilon, double temperature, int tempThreshold, double cpuct,
         int maxMoves, string pauseFlag, double evalMaterialWeight,
         double virtualLossValue, int minGameSamples, bool lotteryNnEval,
-        bool doPrepare)
+        bool doPrepare, int lotteryEvalLimit)
     {
         var red = new AIPlayer(numSims, C: cpuct, seed: gameIdx * 2 + 1,
             aiTeam: 1, threadCount: mctsThreads, neural: neural,
             dirichletAlpha: dirichletAlpha, dirichletEpsilon: dirichletEpsilon,
             evalMaterialWeight: evalMaterialWeight,
             virtualLossValue: virtualLossValue,
-            lotteryNnEval: lotteryNnEval);
+            lotteryNnEval: lotteryNnEval,
+            lotteryEvalLimit: lotteryEvalLimit);
         var black = new AIPlayer(numSims, C: cpuct, seed: gameIdx * 2 + 2,
             aiTeam: -1, threadCount: mctsThreads, neural: neural,
             dirichletAlpha: dirichletAlpha, dirichletEpsilon: dirichletEpsilon,
             evalMaterialWeight: evalMaterialWeight,
             virtualLossValue: virtualLossValue,
-            lotteryNnEval: lotteryNnEval);
+            lotteryNnEval: lotteryNnEval,
+            lotteryEvalLimit: lotteryEvalLimit);
 
         var state = new Gamestate();
         state.prepareModeOn = false;
@@ -188,7 +193,7 @@ public static class SelfPlayTrainer
 
         int winner = 0;
         string endReason = "撞步数上限（和棋）"; // 循环自然结束时即撞上限
-        // 2026-09-08（用户要求）：超短对局剔除阈值（样本数 < 10 即删）
+        // 2026-09-08（用户要求）：超短对局剔除阈值可调（config selfplay.min_game_samples，面板可改）
         var repetitionTracker = new RepetitionTracker(state);
 
         int move;

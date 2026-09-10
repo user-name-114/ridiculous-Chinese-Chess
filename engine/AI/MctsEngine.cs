@@ -1429,12 +1429,23 @@ var ws = rootState.DeepClone();              // 线程私有工作副本
     }
 
     // 预筛打分:目标点有敌子 → -敌方子力值(负=优先);空位/无效 → 0;己方子 → 最后。
-    // 生成类(目标为空)不加分也不减分,同分内保持枚举序。
+    // 2026-09-10(用户核查):双目标组合(双生成/双升级)打分 = 两点之和——
+    // 原实现只看第一坐标,双生成组合的第二点若是敌子会漏计优先级,
+    // 导致"敌子必入选"对第二点失效(组合枚举 i<j 固定顺序,敌子可能在第二位)。
+    // 生成类候选生成时已过滤墙/己方(非友伤),敌子位置保留(GenerateAt 覆盖击杀)。
     private static double TargetScore(Gamestate state, LotteryChoice c)
     {
-        if (c.x < state.leftBound || c.x > state.rightBound
-            || c.y < state.lowerBound || c.y > state.upperBound) return 0;
-        Piece p = state[c.x, c.y];
+        double s = PointScore(state, c.x, c.y);
+        if (c.secondX != int.MinValue)
+            s += PointScore(state, c.secondX, c.secondY);
+        return s;
+    }
+
+    private static double PointScore(Gamestate state, int x, int y)
+    {
+        if (x < state.leftBound || x > state.rightBound
+            || y < state.lowerBound || y > state.upperBound) return 0;
+        Piece p = state[x, y];
         if (p.type == PieceType.Empty || p.isDead) return 0;
         if (p.thisTeam != state.currentTeam) return -PieceStrengthPoints(p); // 顶敌子,优先
         return double.MaxValue; // 己方(非友伤时本就不该入选)

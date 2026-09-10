@@ -86,17 +86,20 @@ public static class MatchProgram
 
                 var pa = new AIPlayer(numSims, C: cpuct, seed: i * 2 + 1,
                     aiTeam: aIsRed ? 1 : -1, threadCount: mctsThreads, neural: neuralA,
-                    evalMaterialWeight: evalMaterialWeight, virtualLossValue: virtualLossValue);
+                    evalMaterialWeight: evalMaterialWeight, virtualLossValue: virtualLossValue,
+                    lotteryEvalLimit: lotteryEvalLimit);
                 AIPlayer pb;
                 if (hasNet2)
                     pb = new AIPlayer(numSims, C: cpuct, seed: i * 2 + 2,
                         aiTeam: aIsRed ? -1 : 1, threadCount: mctsThreads, neural: neuralB,
-                        evalMaterialWeight: evalMaterialWeight, virtualLossValue: virtualLossValue);
+                        evalMaterialWeight: evalMaterialWeight, virtualLossValue: virtualLossValue,
+                        lotteryEvalLimit: lotteryEvalLimit);
                 else
                     pb = new AIPlayer(sims2, C: c2, seed: i * 2 + 2,
                         aiTeam: aIsRed ? -1 : 1, threadCount: mctsThreads,
                         maxRolloutDepth: depth2, evalMaterialWeight: w2,
-                        virtualLossValue: vl2, lotteryCMultiplier: mult2);
+                        virtualLossValue: vl2, lotteryCMultiplier: mult2,
+                        lotteryEvalLimit: lotteryEvalLimit);
 
                 var sw = System.Diagnostics.Stopwatch.StartNew();
                 var result = MatchRunner.Run(state, aIsRed ? pa : pb,

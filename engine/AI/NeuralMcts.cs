@@ -225,14 +225,20 @@ public class NeuralMcts
             // 尽量收集更多填满批次
             while (boards.Count < _batchSize)
             {
-                if (_requestQueue.TryTake(out var item, _batchTimeoutMs))
+                PredictRequest item;
+                try
                 {
-                    boards.Add(item.Board);
-                    graveyards.Add(item.Graveyard);
-                    tcsList.Add(item.Tcs);
+                    if (!_requestQueue.TryTake(out item, _batchTimeoutMs))
+                        break;
                 }
-                else
-                    break;
+                catch (InvalidOperationException) { break; } // 含 ObjectDisposedException（其子类）
+                // 2026-09-10（崩溃修复）：StopBatchService 的 CompleteAdding/Dispose 与本
+                // TryTake 并发时，.NET 会抛 "underlying collection was modified from
+                // outside"——collector 线程未捕获直接终止进程。此刻必然是训练收尾
+                // （所有 worker 已结束），丢弃当前半批安全，优雅退出。
+                boards.Add(item.Board);
+                graveyards.Add(item.Graveyard);
+                tcsList.Add(item.Tcs);
             }
 
             // 放入 GPU 队列（GPU 线程可能在等这一批）
