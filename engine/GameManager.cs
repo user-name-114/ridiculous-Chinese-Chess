@@ -2050,7 +2050,7 @@ public class GameManager : MonoBehaviour
             if (clicked != null && freezeTargets.Contains(clicked))
             {
                 // 执行冻结
-                clicked.frozenTurns = 6;
+                clicked.frozenTurns = 5; // 2026-09-09:6→5 与画面 5 拍渐变、规则文本"下两个回合"(禁 2 个己方回合)三方对齐
                 clicked.freezeTickCount = 0;
                 if (pieceMap.TryGetValue(clicked, out GameObject go))
                     go.GetComponent<PieceView>().SetFrozen(true, clicked.upgradeLevel > 0);
