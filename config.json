@@ -31,12 +31,12 @@
     "num_games": 8,
     "dirichlet_alpha": 0.3,
     "dirichlet_epsilon": 0.1,
-    "max_moves": 250,
+    "max_moves": 260,
     "parallel_games": 8,
     "mcts_threads": 8,
     "neural_batch_size": 32,
     "neural_batch_timeout_ms": 24,
     "match_parallel_games": 4,
-    "min_game_samples": 10
+    "min_game_samples": 15
   }
 }

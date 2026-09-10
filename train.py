@@ -316,8 +316,8 @@ def train(config, data, checkpoint_dir, resume_from=None, net_name="latest"):
     val_policy_hist = []   # [(步数, 验证 policy loss)]
     val_value_hist = []    # [(步数, 验证 value loss)]
     ckpts = []             # [(步数, 路径, 验证 policy loss, 验证 value loss)]
-    first_val_value = None # 首次验证的 value loss（早停判据基准）
-    early_stopped = False
+    # 2026-09-09（用户要求）：value loss 早停机制已取消——训练始终跑满 num_train_steps，
+    # 主/副版本由训练后处理按 value<1 筛选规则决定。
     last_val_step = None
     perm = np.random.permutation(n)  # 无放回抽样：打乱后的索引队列
     ptr = 0
@@ -414,18 +414,9 @@ def train(config, data, checkpoint_dir, resume_from=None, net_name="latest"):
             val_value_hist.append((step + 1, v_val))
             last_val_step = step + 1
 
-            # ── 需求 4：value loss 早停（首验 < 1 且后续任一验证 > 1 → 终止）──
-            if first_val_value is None:
-                first_val_value = v_val
-            elif first_val_value < 1.0 and v_val > 1.0:
-                print(f"[早停] 首次验证 value loss {first_val_value:.4f} < 1，"
-                      f"当前 {v_val:.4f} > 1 → 终止训练"
-                      "（由后处理自动保留 policy 损失最低与最后版本）")
-                early_stopped = True
-                break
 
-    # ── 训练结束（正常/早停）后的末次验证：让最终状态也参与对比 ──
-    if not early_stopped and (last_val_step is None or last_val_step != num_steps) \
+    # ── 训练结束后的末次验证：让最终状态也参与对比 ──
+    if (last_val_step is None or last_val_step != num_steps) \
             and v_boards.shape[0] > 0:
         model.eval()
         vps = vvs_ = 0.0
@@ -467,31 +458,58 @@ def train(config, data, checkpoint_dir, resume_from=None, net_name="latest"):
 
     # ── 需求 3/5/6：训练后处理（最优改名 / 末版子文件夹 / ONNX 导出）──
     if ckpts:
-        best = min(ckpts, key=lambda c: c[2])   # policy loss 最低
+        best = min(ckpts, key=lambda c: c[2])   # 全局 policy loss 最低
         last = max(ckpts, key=lambda c: c[0])   # 步数最大 = 最后版本
 
-        # 需求 3：policy loss 最低者改名为【命名】.pt（子文件夹外）
-        final_pt = os.path.join(checkpoint_dir, f"{net_name}.pt")
-        os.replace(best[1], final_pt)
-        print(f"[后处理] policy loss 最低 {best[2]:.4f}（step {best[0]}）→ {os.path.basename(final_pt)}")
+        # 2026-09-09（用户要求，替代原 value 早停）：
+        # 主版本 = value loss < 1 的验证点中 policy loss 最低者 → 根目录【命名】.pt；
+        # 全局 policy loss 最低但 value >= 1 的版本不能当主版本，
+        # 作为副版本保存到 best_policy 子文件夹（与 last 副版本同方式）；
+        # 若没有任何 value < 1 的验证点，主版本退化为最后版本（日志说明）。
+        good = [c for c in ckpts if c[3] < 1.0]
+        if good:
+            main = min(good, key=lambda c: c[2])
+            main_reason = f"value<1 的 {len(good)} 个验证点中 policy 最低"
+        else:
+            # 2026-09-10（用户澄清）：全程 value>=1 无合格候选时，
+            # 主版本 = 全局 policy loss 最低者（value>=1 也产出主版本）
+            main = best
+            main_reason = "无 value<1 的验证点，主版本取全局 policy 最低（value>=1）"
+        main_is_global_best = (main[0] == best[0])
+        main_is_last = (main[0] == last[0])
 
-        # 需求 5：最优 ≠ 最后 → 子文件夹 last\ 保留最后版本为【命名】_last.pt
-        if last[0] != best[0]:
+        # 主版本改名为【命名】.pt（子文件夹外）
+        final_pt = os.path.join(checkpoint_dir, f"{net_name}.pt")
+        os.replace(main[1], final_pt)
+        print(f"[后处理] 主版本: step {main[0]}（policy={main[2]:.4f}, value={main[3]:.4f}）"
+              f"→ {os.path.basename(final_pt)}（{main_reason}）")
+
+        # 副版本 1：最后版本（主版本 ≠ 最后时）→ last\【命名】_last.pt（规则不变）
+        if not main_is_last:
             sub = os.path.join(checkpoint_dir, "last")
             os.makedirs(sub, exist_ok=True)
             dst = os.path.join(sub, f"{net_name}_last.pt")
             os.replace(last[1], dst)
             print(f"[后处理] 最后版本（step {last[0]}）→ {dst}")
 
-        # 需求 6（2026-09-08 用户更正）：导出 policy loss 最低版本的 ONNX
-        # （与刚改名的【命名】.pt 同一份——统一口径，避免两个“最优”并存）
+        # 副版本 2：全局 policy 最低但 value >= 1 → best_policy\【命名】_best_policy.pt
+        # （主版本即全局最低时不产生；与最后版本同一步数时已并入 last 副版本，不重复）
+        if not main_is_global_best and best[0] != last[0]:
+            sub2 = os.path.join(checkpoint_dir, "best_policy")
+            os.makedirs(sub2, exist_ok=True)
+            dst2 = os.path.join(sub2, f"{net_name}_best_policy.pt")
+            os.replace(best[1], dst2)
+            print(f"[后处理] policy 最低 {best[2]:.4f} 但 value={best[3]:.4f} >= 1（step {best[0]}）"
+                  f"→ {dst2}（副版本）")
+
+        # ONNX 导出源 = 主版本（根目录【命名】.pt，与面板【导出】按钮同源）
         onnx_ok = False
         try:
             from export_onnx import export as _export_onnx
             onnx_path = os.path.join(checkpoint_dir, f"{net_name}.onnx")
             _export_onnx(final_pt, onnx_path, config)
             onnx_ok = True
-            print(f"[后处理] ONNX 导出（policy loss 最低 {best[2]:.4f}，step {best[0]}）→ {onnx_path}")
+            print(f"[后处理] ONNX 导出（主版本 policy={main[2]:.4f}，step {main[0]}）→ {onnx_path}")
         except Exception as ex:
             print(f"[后处理] ONNX 导出失败: {ex}（保留全部中间 .pt 存档，可用面板【导出】按钮手动导出 ONNX）")
     else:
@@ -508,7 +526,7 @@ def train(config, data, checkpoint_dir, resume_from=None, net_name="latest"):
             os.remove(p)
             removed += 1
         if removed:
-            print(f"[后处理] 已清理中间存档 {removed} 份（仅保留 policy 最低与最后版本）")
+            print(f"[后处理] 已清理中间存档 {removed} 份（仅保留主版本与副版本）")
 
     # 需求 1：验证点 policy / value loss 折线图（保存在同一文件夹）
     def _plot_hist(hist, fname, ylabel, title, color):
