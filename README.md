@@ -2,6 +2,8 @@
 GameManager.cs和RuleEngine在子目录里，它们为unity内游戏的直接实现，一切规则以它们的表述为准。只有看过这两个才知道这个项目在干什么。
 
 如果你打不开，
+0.最直接的方式是codeload.github.com/user-name-114/ridiculous-Chinese-Chess/zip/refs/heads/main获取整个项目的zip，约100k
+
 1. 获取根目录文件列表
 向仓库的树形页面 URL（https://github.com/user-name-114/ridiculous-Chinese-Chess/tree/main）发送 fetch 请求。GitHub 返回的 HTML 页面中嵌入了目录树结构，请从中解析出顶层目录（如 engine/、collector/）和根目录文件（如 train.py、config.json）。
 
